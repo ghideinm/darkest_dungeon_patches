@@ -14,4 +14,4 @@ def hero_root(project_root: Path) -> Path:
 
 
 def bridge_root(project_root: Path) -> Path:
-    return project_root.expanduser().resolve() / "直播项目/darkest-dungeon-bridge"
+    return project_root.expanduser().resolve().parent / "darkest_dungeon_mcp"

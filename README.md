@@ -41,7 +41,7 @@ python launch.py --native-render --rig-map skin_rig_map.txt
 - `paths.py` 集中管理默认路径；游戏默认在当前用户的 Steam 目录。
 - `manage.py --game-root <目录>` 指定游戏根目录；`launch.py --game <程序>` 指定原生可执行文件。
 - `--project-root <目录>` 指定角色项目，默认是同级 `Darkest Dungeon`。安装／恢复皮肤包时从其中的 `游戏模组/DeepSeek强盗` 取资源与安装器。
-- `--with-mcp` 可选加载观察器与调试入口，普通游戏控制关闭。默认桥接项目为角色项目的 `直播项目/darkest-dungeon-bridge`，可用 `--bridge-root <目录>` 覆写；其 Python 环境须已就绪，HTTP／MCP 服务另行连接。
+- `--with-mcp` 可选加载观察器与调试入口，普通游戏控制关闭。默认桥接项目为角色项目同级的 `darkest_dungeon_mcp`，可用 `--bridge-root <目录>` 覆写；其 Python 环境须已就绪，HTTP／MCP 服务另行连接。
 - 普通补丁检查与启动不依赖角色工程或 MCP。构建产物与运行报告位于系统临时目录，不进入源码目录。
 
 ## 兼容边界
