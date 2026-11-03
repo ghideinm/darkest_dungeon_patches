@@ -1,0 +1,7 @@
+# 皮肤目录 骨架组 动作资源文件名前缀；配置目录不带末尾分隔符，游戏返回路径会去掉末尾分隔符再匹配。
+# 目前对应隔离测试包：原版四套及DeepSeek E。
+heroes/highwayman/highwayman_A vanilla highwayman.sprite.rig_vanilla.
+heroes/highwayman/highwayman_B vanilla highwayman.sprite.rig_vanilla.
+heroes/highwayman/highwayman_C vanilla highwayman.sprite.rig_vanilla.
+heroes/highwayman/highwayman_D vanilla highwayman.sprite.rig_vanilla.
+heroes/highwayman/highwayman_E deepseek highwayman.sprite.
