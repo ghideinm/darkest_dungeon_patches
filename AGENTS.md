@@ -3,6 +3,7 @@
 - 默认中文。仅维护 Linux 28212 的资源读取、原生画布和皮肤骨架路由补丁。
 - 目录及源码、脚本、配置使用 snake_case；统一入口是 `manage.py`，底层启动器是 `launch.py`。
 - C11 使用 Clang，保留 `-Wall -Wextra -Werror`。不随路径整理更改原生地址、指令或补丁开关。
+- 使用 `pnpm format` 应用 LLVM 默认格式，提交前通过 `pnpm check`（clang-format／clang-tidy）。Husky 管理 Hook，commitlint 继承 Conventional Commits；ESM 配置使用 `export default`，不新增自定义消息规则。
 - 运行时改写前检查游戏身份与全部原指令；不修改磁盘游戏程序，不跳过游戏断言。
 - 游戏、角色工程、MCP 和本项目各自独立；外部路径经参数配置。商业资源、存档、构建产物与临时日志不提交。
 - 验证优先使用 `python manage.py check` 和现有 C 自测入口。区分离线检查、原生日志、实际画面验证及用户美术认可。

@@ -1,0 +1,4 @@
+Checks: clang-analyzer-*
+CheckOptions:
+  # Only suggest Annex K functions when the target libc provides them.
+  clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling:ReportMode: actionable

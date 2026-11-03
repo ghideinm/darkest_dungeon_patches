@@ -49,3 +49,22 @@ python launch.py --native-render --rig-map skin_rig_map.txt
 仅支持 SHA-256 为 `fe1a629f7afa74e716cb440b14db6470d572ed244e0a2420521e521bc1102156` 的 Linux x86-64 原生程序。版本或指令不符即拒绝。
 
 读取补丁把六个缓冲的容量总计由 36 提至 192 MiB；实际驻留内存按需分配。它不会提高 GPU 纹理上限。画布补丁跟随实际分辨率，保持原逻辑布局与输入坐标；没有增加运行中热重建机制。骨架路由仍为已验证限定场景的原型，不能视为全部 Mod 组合兼容。画面清晰度和资源加载验证不代表角色美术已获认可。
+
+## 提交前检查
+
+先安装系统工具 Node.js、pnpm、Clang、clang-format 和 clang-tidy，再运行：
+
+```sh
+pnpm install --frozen-lockfile
+pnpm check
+```
+
+Husky 的 `pre-commit` 执行 `pnpm check`，格式或静态分析失败会阻止提交；`commit-msg` 调用 commitlint，使用 `commitlint.config.js` 的 `export default` 配置，直接继承 `@commitlint/config-conventional`。安装时 `prepare` 自动配置 Husky，`.husky/_` 由它生成，不提交。
+
+- `pnpm format`：按 `.clang-format` 的 LLVM 默认风格整理全部 C 源码。
+- `pnpm check:format`：只检查格式，不改文件。
+- `pnpm check:tidy`：分析全部 C 源码及已有的 `DD_PATCH_SELFTEST` 条件编译分支，使用 C11 和 `-Wall -Wextra -Werror`；分析警告也视为错误。
+
+`.clang-tidy` 仅启用基础 `clang-analyzer-*`。其中 Annex K 替代函数建议设为官方提供的 `actionable` 模式，仅在目标 C 库提供这些接口时报告，避免要求 Linux 补丁调用不可用的 `memcpy_s` 等函数；其他分析规则保持默认。参考 [Clang 检查器文档](https://clang.llvm.org/docs/analyzer/checkers.html#security-insecureapi-deprecatedorunsafebufferhandling)。
+
+`node_modules` 和构建产物不提交；保留 `package.json`、`pnpm-lock.yaml`、配置与两个 Hook。提交消息示例：`fix: correct skin rig routing`。
