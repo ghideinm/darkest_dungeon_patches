@@ -91,25 +91,27 @@ def main():
     parser.add_argument('--bridge-root', type=Path)
     parser.add_argument('--destination', type=Path)
     parser.add_argument('--with-mcp', action='store_true', help='启动时附带观察器和调试入口')
+    parser.add_argument('--packaged-rig', action='store_true', help='使用旧的隔离打包与路由索引；默认按运行时来源解析')
     args = parser.parse_args()
-    config = load_config(args.config)
     game = args.game_root.expanduser().resolve(strict=True)
-    destination = (args.destination or game / config['destination']).expanduser()
-    if destination.is_symlink() or destination.parent.resolve() != (game / 'mods').resolve():
-        raise ValueError('Destination must be one direct Mod directory under <game-root>/mods')
     executable = game / '_linux/darkest.bin.x86_64'
     if args.action == 'check':
-        validate(executable, native_render=True, rig_routing=True)
+        validate(executable, native_render=True, rig_routing=True, runtime_rig=not args.packaged_rig)
         libraries = [build_library(), build_library('skin_rig_patch.c', 'libdd_skin_rig_patch.so')]
         print(json.dumps({'game_sha256': EXPECTED_SHA256, 'check_only': True,
                           'disk_binary_modified': False, 'libraries': list(map(str, libraries)),
-                          'routing_mode': 'configured' if 'heroes' in config else 'automatic_discovery',
+                          'routing_mode': 'package_map' if args.packaged_rig else 'runtime_source',
                           'package_checked': False}, ensure_ascii=False, indent=2))
         return
+    if args.action in {'install', 'restore'} or args.packaged_rig:
+        config = load_config(args.config)
+        destination = (args.destination or game / config['destination']).expanduser()
+        if destination.is_symlink() or destination.parent.resolve() != (game / 'mods').resolve():
+            raise ValueError('Destination must be one direct Mod directory under <game-root>/mods')
     if args.action in {'install', 'restore'}:
         ensure_game_stopped()
         validate(executable, native_render=True, rig_routing=True)
-        if args.action == 'restore':
+        if args.action == 'restore' or not args.packaged_rig:
             release = original_release(config, args.project_root, args.source)
             result = install_package(release, destination)
         else:
@@ -118,23 +120,25 @@ def main():
                 result = install_package(package, destination)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
-    if args.action == 'launch':
+    if args.action == 'launch' and args.packaged_rig:
         try:
             config = validate_installed(config, destination, game)
         except (OSError, ValueError, KeyError) as error:
-            raise RuntimeError('隔离 Mod 未就绪或与配置不符；退出游戏后执行 manage.py install') from error
-    # The same configuration builds the package and generates its runtime routes.
+            raise RuntimeError('隔离 Mod 未就绪或与配置不符；退出游戏后执行 manage.py install --packaged-rig') from error
+    command = [sys.executable, str(HERE / 'launch.py'), '--game', str(executable),
+               '--project-root', str(args.project_root), '--native-render']
+    if args.bridge_root:
+        command.extend(['--bridge-root', str(args.bridge_root)])
+    if args.with_mcp:
+        command.append('--with-mcp')
+    if not args.packaged_rig:
+        subprocess.run(command + ['--runtime-rig'], check=True)
+        return
+    # Explicit compatibility mode for previously generated isolated packages.
     with tempfile.TemporaryDirectory(prefix='dd-rig-launch-') as directory:
         mapping = Path(directory) / 'skin_rig_map.txt'
         write_rig_map(config, mapping)
-        command = [sys.executable, str(HERE / 'launch.py'), '--game', str(executable),
-                   '--project-root', str(args.project_root),
-                   '--native-render', '--rig-map', str(mapping)]
-        if args.bridge_root:
-            command.extend(['--bridge-root', str(args.bridge_root)])
-        if args.with_mcp:
-            command.append('--with-mcp')
-        subprocess.run(command, check=True)
+        subprocess.run(command + ['--rig-map', str(mapping)], check=True)
 
 
 if __name__ == '__main__':

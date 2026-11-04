@@ -25,9 +25,16 @@ RENDER_SITES = [(0xca13ca, bytes.fromhex('bd 80 07 00 00')),
 RIG_SITES = [(0xefc214, bytes.fromhex('e8 f7 2e b7 ff')),
              (0xd66e80, bytes.fromhex('41 57 41 56 53')),
              (0x11a8400, bytes.fromhex('41 56 53 48 81 ec 08 02 00 00'))]
+RUNTIME_SITES = [(0xa5a7d0, bytes.fromhex('55 53 48 81 ec 48 04 00 00')),
+                 (0xc27c90, bytes.fromhex('55 41 57 41 56 41 55 41 54 53')),
+                 (0xc27d90, bytes.fromhex('48 89 f8 48 8b 3f 48 85 ff')),
+                 (0xc3a260, bytes.fromhex('41 57 41 56 41 54 53')),
+                 (0xa63a60, bytes.fromhex('83 3f 00 78 38')),
+                 (0xc3f3f0, bytes.fromhex('41 56 53 50 48 63 06')),
+                 (0xa70a60, bytes.fromhex('55 41 57 41 56 41 55 41 54 53 50'))]
 
 
-def validate(game, native_render=False, rig_routing=False):
+def validate(game, native_render=False, rig_routing=False, runtime_rig=False):
     import struct
 
     data = game.read_bytes()
@@ -45,12 +52,14 @@ def validate(game, native_render=False, rig_routing=False):
         actual = data[pos + address - start:pos + address - start + 5]
         if actual != bytes([0xb9 if i == 6 else 0xbf, 0, 0, 0x60, 0]):
             raise ValueError(f'Unexpected patch site {address:x}')
-    extra_sites = (RENDER_SITES if native_render else []) + (RIG_SITES if rig_routing else [])
+    extra_sites = ((RENDER_SITES if native_render else []) +
+                   (RIG_SITES if rig_routing or runtime_rig else []) +
+                   (RUNTIME_SITES if runtime_rig else []))
     if extra_sites:
         for address, expected in extra_sites:
             start, _, pos = next(s for s in segments if s[0] <= address and address + len(expected) <= s[1])
             if data[pos + address - start:pos + address - start + len(expected)] != expected:
-                raise ValueError(f'Unexpected render patch site {address:x}')
+                raise ValueError(f'Unexpected native instruction site {address:x}')
 
 
 def build_library(source_name='resource_loading_patch.c', library_name='libdd_resource_loading_patch.so'):
@@ -83,7 +92,9 @@ def main():
     parser.add_argument('--check', action='store_true', help='Verify binary and compile patch; do not start the game')
     parser.add_argument('--with-mcp', action='store_true', help='Also load the existing observer with debugging and normal gameplay control disabled')
     parser.add_argument('--native-render', action='store_true', help='Make main, dungeon and GUI targets follow the physical game canvas without the 1920 cap')
-    parser.add_argument('--rig-map', type=Path, help='Experimental per-skin rig routing map; requires the matching staged Mod package')
+    rig_options = parser.add_mutually_exclusive_group()
+    rig_options.add_argument('--rig-map', type=Path, help='Legacy per-skin map; requires the matching staged Mod package')
+    rig_options.add_argument('--runtime-rig', action='store_true', help='Discover rigs from the active skin file provider at runtime; no package map')
     parser.add_argument('--launch-report', type=Path, default=Path(tempfile.gettempdir()) / 'dd-loadbuffer-launch.json')
     args = parser.parse_args()
     bridge_root = (args.bridge_root or project_bridge_root(args.project_root)).expanduser().resolve()
@@ -93,7 +104,7 @@ def main():
             parser.error('MCP Python environment not found; set --bridge-root or --project-root')
         os.execv(bridge_python, [str(bridge_python), str(Path(__file__).resolve()), *sys.argv[1:]])
     game = args.game.resolve(strict=True)
-    validate(game, args.native_render, bool(args.rig_map))
+    validate(game, args.native_render, bool(args.rig_map), args.runtime_rig)
     library = build_library()
     report = {'game_sha256': EXPECTED_SHA256, 'cap_bytes': 0x2000000,
               'buffers': 6, 'patch_sites': len(SITES), 'library': str(library),
@@ -103,11 +114,16 @@ def main():
               'render_cap_pixels': None if args.native_render else [1920, 1080],
               'render_size_policy': 'physical_game_canvas' if args.native_render else 'original_caps'}
     rig_library = None
-    if args.rig_map:
-        args.rig_map = args.rig_map.resolve(strict=True)
-        read_rig_map(args.rig_map)
+    if args.rig_map or args.runtime_rig:
+        if args.rig_map:
+            args.rig_map = args.rig_map.resolve(strict=True)
+            read_rig_map(args.rig_map)
         rig_library = build_library('skin_rig_patch.c', 'libdd_skin_rig_patch.so')
-        report.update(rig_routing_experimental=True, rig_map=str(args.rig_map), rig_library=str(rig_library))
+        report.update(rig_routing_experimental=True,
+                      rig_mode='runtime_source' if args.runtime_rig else 'package_map',
+                      rig_map=str(args.rig_map) if args.rig_map else None,
+                      runtime_api_sites=len(RUNTIME_SITES) if args.runtime_rig else 0,
+                      rig_library=str(rig_library))
     if args.check:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return
@@ -133,6 +149,10 @@ def main():
         os.environ['DD_RIG_MAP'] = str(args.rig_map)
     else:
         os.environ.pop('DD_RIG_MAP', None)
+    if args.runtime_rig:
+        os.environ['DD_RIG_RUNTIME'] = '1'
+    else:
+        os.environ.pop('DD_RIG_RUNTIME', None)
     preload = str(library) + (':' + str(rig_library) if rig_library else '')
     os.environ['LD_PRELOAD'] = preload + (':' + os.environ['LD_PRELOAD'] if os.environ.get('LD_PRELOAD') else '')
     report['game_pid'] = os.getpid()
