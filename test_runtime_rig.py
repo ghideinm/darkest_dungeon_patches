@@ -36,12 +36,14 @@ class RuntimeRigFixture:
         self.root = Path(self.tree.name)
         self.skin = 'heroes/alpha/alpha_E'
 
-    def rig(self, directory, valid=True):
+    def rig(self, directory, valid=True, action='idle', pages=('idle.png', 'walk.png')):
         path = self.root / directory
-        path.mkdir(parents=True)
-        (path / 'alpha.sprite.idle.skel').write_bytes(b'fixture, not a parsed skeleton')
+        path.mkdir(parents=True, exist_ok=True)
+        (path / f'alpha.sprite.{action}.skel').write_bytes(b'fixture, not a parsed skeleton')
         if valid:
-            (path / 'alpha.sprite.idle.atlas').write_text('\nalpha.sprite.idle.png\nsize: 8,8\n')
+            (path / f'alpha.sprite.{action}.atlas').write_text(''.join(
+                f'\n{page}\nsize: 8,8\nformat: RGBA8888\nregion\n  rotate: false\n'
+                for page in pages))
 
     def resolve(self, full='mods/chosen/heroes/alpha/alpha_E/anim/idle.png'):
         return subprocess.run([str(self.binary), '--source-rig', self.skin, 'idle.png', full],
@@ -240,6 +242,8 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         cls.library.dd_runtime_test_bind.restype = None
         cls.library.dd_runtime_test_sprite.argtypes = [ctypes.c_char_p]
         cls.library.dd_runtime_test_sprite.restype = ctypes.c_void_p
+        cls.library.dd_runtime_test_matches.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        cls.library.dd_runtime_test_matches.restype = ctypes.c_int
 
     def setUp(self):
         super().setUp()
@@ -348,6 +352,60 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         self.assertEqual(self.loaded, [])
         self.assertEqual(self.created, [])
         self.assertEqual(self.destroyed, [True])
+
+    def test_independent_actions_compose_dlc_and_base_skeletons(self):
+        self.rig('dlc/official/heroes/alpha/anim', action='dead', pages=('dead.png',))
+        self.rig('heroes/alpha/anim', action='walk', pages=('walk.png',))
+        self.entries[0].value = b'dead.png'
+        self.sources = {'dead.png': 'dlc/official/', 'walk.png': ''}
+        self.assertEqual(self.library.dd_runtime_test_sprite(self.skin.encode()), 0x1234)
+        self.assertEqual([entry[0] for entry in self.loaded], [
+            '>dlc/official/heroes/alpha/anim/alpha.sprite.dead.skel',
+            '>heroes/alpha/anim/alpha.sprite.walk.skel'])
+        self.assertEqual(self.created, [2])
+        self.assertEqual(self.released, [0, 1])
+
+    def test_existing_highwayman_c_dlc_dead_and_base_walk(self):
+        base = DEFAULT_GAME_ROOT / 'heroes/highwayman/anim/highwayman.sprite.walk.skel'
+        dead = DEFAULT_GAME_ROOT / 'dlc/1117860_arena_mp/heroes/highwayman/anim/highwayman.sprite.dead.skel'
+        if not base.is_file() or not dead.is_file():
+            self.skipTest('Installed base and official DLC assets unavailable')
+        os.chdir(DEFAULT_GAME_ROOT)  # Read existing atlases only; factory calls remain mocked.
+        self.skin = 'heroes/highwayman/highwayman_C'
+        self.entries[0].value = b'highwayman.sprite.dead.png'
+        self.entries[1].value = b'highwayman.sprite.walk.png'
+        self.sources = {'highwayman.sprite.dead.png': 'dlc/1117860_arena_mp/',
+                        'highwayman.sprite.walk.png': ''}
+        self.assertEqual(self.library.dd_runtime_test_sprite(self.skin.encode()), 0x1234)
+        self.assertEqual([entry[0] for entry in self.loaded], [
+            '>dlc/1117860_arena_mp/heroes/highwayman/anim/highwayman.sprite.dead.skel',
+            '>heroes/highwayman/anim/highwayman.sprite.walk.skel'])
+        self.assertEqual(self.created, [2])
+
+    def test_unrelated_palette_image_does_not_select_extra_skeletons(self):
+        self.rig('mods/chosen/heroes/alpha/anim', pages=('idle.png',))
+        self.assertEqual(self.library.dd_runtime_test_sprite(self.skin.encode()), 0x1234)
+        self.assertEqual(self.created, [1])
+
+    def test_sprite_identity_checks_every_action_source(self):
+        self.rig('dlc/official/heroes/alpha/anim', action='dead', pages=('dead.png',))
+        self.rig('heroes/alpha/anim', action='walk', pages=('walk.png',))
+        self.entries[0].value = b'dead.png'
+        self.sources = {'dead.png': 'dlc/official/', 'walk.png': ''}
+        self.assertEqual(self.library.dd_runtime_test_sprite(self.skin.encode()), 0x1234)
+        states = (ctypes.c_ubyte * 0x60)()
+        for i in range(2):
+            ctypes.c_int.from_buffer(states, i * 0x30).value = i
+            ctypes.c_int.from_buffer(states, i * 0x30 + 4).value = 1
+        sprite = (ctypes.c_ubyte * 0x40)()
+        ctypes.c_void_p.from_buffer(sprite, 0x20).value = ctypes.addressof(states)
+        ctypes.c_void_p.from_buffer(sprite, 0x28).value = ctypes.addressof(states) + 0x60
+        self.assertEqual(self.library.dd_runtime_test_matches(ctypes.addressof(sprite),
+                                                             self.skin.encode()), 1)
+        self.rig('mods/other/heroes/alpha/anim', action='walk', pages=('walk.png',))
+        self.sources['walk.png'] = 'mods/other/'
+        self.assertEqual(self.library.dd_runtime_test_matches(ctypes.addressof(sprite),
+                                                             self.skin.encode()), 0)
 
     def test_native_cache_alias_and_failed_load_release_handle(self):
         self.rig('mods/chosen/heroes/alpha/anim')
