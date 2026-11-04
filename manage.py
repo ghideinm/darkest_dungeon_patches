@@ -83,7 +83,8 @@ def install_package(package, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['check', 'install', 'launch', 'restore'])
+    parser.add_argument('action', choices=['check', 'install', 'launch', 'restore',
+                                           'steam_install', 'steam_status', 'steam_uninstall'])
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--source', type=Path, help='原始 Mod 发布包；覆盖配置中的 source')
     parser.add_argument('--project-root', type=Path, default=DEFAULT_PROJECT_ROOT)
@@ -92,7 +93,20 @@ def main():
     parser.add_argument('--destination', type=Path)
     parser.add_argument('--with-mcp', action='store_true', help='启动时附带观察器和调试入口')
     parser.add_argument('--packaged-rig', action='store_true', help='使用旧的隔离打包与路由索引；默认按运行时来源解析')
+    parser.add_argument('--steam-root', type=Path, default=Path.home() / '.local/share/Steam')
+    parser.add_argument('--steam-user', help='Steam userdata 数字账号 ID；默认选择最近登录账号')
+    parser.add_argument('--install-root', type=Path, help='Steam 原生启动器与预编译补丁的固定安装目录')
     args = parser.parse_args()
+    if args.action.startswith('steam_'):
+        from steam_integration import default_install_root, integrate
+
+        if args.action != 'steam_status':
+            ensure_game_stopped()
+        result = integrate(args.action,
+                           args.game_root.expanduser().resolve() / '_linux/darkest.bin.x86_64',
+                           args.steam_root, args.install_root or default_install_root(), args.steam_user)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     game = args.game_root.expanduser().resolve(strict=True)
     executable = game / '_linux/darkest.bin.x86_64'
     if args.action == 'check':

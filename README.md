@@ -8,7 +8,7 @@
 | 原生分辨率画布 | `--native-render`；跟随实际画布，保留逻辑布局与输入坐标 |
 | 按皮肤切换骨架 | `--runtime-rig`；按当前皮肤的实际文件来源发现骨架，覆盖角色本体与详情预览 |
 
-启动器校验游戏 SHA-256、全部改写点与运行时接口指令。补丁只修改本次进程内存，磁盘游戏程序保持原样，普通 Steam 启动不自动带补丁。运行时来源模式已通过离线验证，游戏画面、换肤和战斗全流程待实机验证。
+启动器校验游戏 SHA-256、全部改写点与运行时接口指令。补丁只修改本次进程内存，磁盘游戏程序保持原样。可一次性接入 Steam，以后直接点击“开始游戏”加载三项补丁。运行时来源模式已通过离线验证，游戏画面、换肤和战斗全流程待实机验证。
 
 ## 使用
 
@@ -30,6 +30,29 @@ python launch.py --native-render
 ```
 
 `manage.py --game-root <目录>` 指定游戏根目录；`launch.py --game <程序>` 指定原生可执行文件。最后一条仅启用读取与画布补丁。
+
+## Steam 自动加载
+
+正常退出游戏和 Steam 后，一次性执行：
+
+```sh
+python manage.py steam_install
+```
+
+随后重新打开 Steam，照常点击《暗黑地牢》的“开始游戏”。安装器只为最近登录的 Steam 账号、AppID `262060` 接入启动包装器；已有启动选项会保留。可用 `--steam-root`、`--steam-user` 指定客户端和 userdata 数字账号 ID。安装、更新和撤销时要求 Steam 已退出，避免客户端覆盖配置。
+
+默认固定安装到 `${XDG_DATA_HOME:-~/.local/share}/darkest_dungeon_patches`，可用 `--install-root` 指定；该路径不能包含空白或冒号。安装器预编译两个 SO 和 C11 原生启动器，用版本目录与 `current` 链接切换；日常启动不依赖 Python、Clang、源码目录或 `/tmp` 缓存，需系统提供 coreutils 的 `sha256sum`。每次启动仍校验整个游戏 SHA-256 和全部 24 处原指令，校验失败以 125 拒绝启动。
+
+包装器保留 Steam 的原启动命令、运行时包装和参数，将游戏入口选择为已校验的 Linux x86-64 程序，再设置 `LD_PRELOAD` 与三项补丁开关。其他预加载库继续保留，旧 `DD_RIG_MAP` 清除；重复预加载本项目补丁会被拒绝。Steam 游戏入口仍需为原生 Linux 版本。直接绕过 Steam 执行原游戏文件不自动加载补丁。
+
+```sh
+python manage.py steam_status
+python manage.py steam_uninstall
+```
+
+`steam_status` 检查配置及已安装原生启动器；`steam_uninstall` 在 Steam 退出后恢复原启动选项，保留安装产物供排查。安装后若手动修改了启动选项，撤销或更新会拒绝覆盖。更新源码后重新运行 `steam_install` 才会更新固定补丁；游戏版本不符时不会自动跳过校验。
+
+启动及补丁日志默认写到 `${XDG_STATE_HOME:-~/.local/state}/darkest_dungeon_patches/steam_launch.log`，每次启动覆盖；与游戏自己的日志独立。
 
 ## 运行时骨架来源
 
@@ -89,7 +112,7 @@ python build_skin_package.py --config /path/to/skin_package.json --output /tmp/m
 
 仅支持 SHA-256 为 `fe1a629f7afa74e716cb440b14db6470d572ed244e0a2420521e521bc1102156` 的 Linux x86-64 原生程序。版本或指令不符即拒绝，不跳过游戏断言。
 
-读取补丁把六个缓冲的容量总计由 36 提至 192 MiB，实际驻留内存按需分配，不提高 GPU 纹理上限。画布补丁没有运行中热重建机制。构建产物和日志放系统临时目录，安装切换目录位于目标 Mod 目录旁，不进入源码目录。离线检查、原生日志、实际画面和用户美术认可分别验证。
+读取补丁把六个缓冲的容量总计由 36 提至 192 MiB，实际驻留内存按需分配，不提高 GPU 纹理上限。画布补丁没有运行中热重建机制。开发构建和临时日志放系统临时目录；Steam 安装产物与日志位于上述用户数据和状态目录；Mod 安装切换目录位于目标 Mod 目录旁，均不进入源码目录。离线检查、原生日志、实际画面和用户美术认可分别验证。
 
 ## 提交前检查
 
@@ -106,7 +129,7 @@ Husky 的 `pre-commit` 执行 `pnpm check`，格式或静态分析失败会阻�
 - `pnpm check:format`：只检查格式，不改文件。
 - `pnpm check:tidy`：分析全部 C 源码及已有的 `DD_PATCH_SELFTEST` 条件编译分支，使用 C11 和 `-Wall -Wextra -Werror`；分析警告也视为错误。
 
-离线回归使用 `python -m unittest -v test_runtime_rig test_skin_package`；两个 C 源码均可用 `clang -std=c11 -O2 -Wall -Wextra -Werror -DDD_PATCH_SELFTEST <源码> -ldl -lm -o /tmp/<自测程序>` 编译后运行。Python 测试只操作系统临时目录，不接触实际游戏或存档。
+离线回归使用 `python -m unittest -v test_runtime_rig test_skin_package test_steam_integration`；两个补丁 C 源码均可用 `clang -std=c11 -O2 -Wall -Wextra -Werror -DDD_PATCH_SELFTEST <源码> -ldl -lm -o /tmp/<自测程序>` 编译后运行。Steam 测试用临时 ELF 和假库执行实际原生启动器，验证无 Python 的启动、原参数与环境传递、64 位入口选择、版本／指令拒绝、配置恢复与失败回滚；不会启动 Steam 或游戏。
 
 `.clang-tidy` 仅启用基础 `clang-analyzer-*`。其中 Annex K 替代函数建议设为官方提供的 `actionable` 模式，仅在目标 C 库提供这些接口时报告，避免要求 Linux 补丁调用不可用的 `memcpy_s` 等函数；其他分析规则保持默认。参考 [Clang 检查器文档](https://clang.llvm.org/docs/analyzer/checkers.html#security-insecureapi-deprecatedorunsafebufferhandling)。
 
