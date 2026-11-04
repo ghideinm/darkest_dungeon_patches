@@ -98,10 +98,12 @@ def build(game: Path, compiler: str | None = None):
                     '-lbcrypt', '-o', str(launcher)], check=True)
     subprocess.run([*common, '-shared', str(HERE / 'skin_rig_patch.c'),
                     '-lm', '-o', str(library)], check=True)
-    for name in ('windows_deploy.ps1', 'windows_start.cmd',
+    for name in ('windows_deploy.ps1', 'windows_start.cmd', 'windows_steam.ps1',
+                 'windows_steam.cmd',
                  'windows_diagnose.cmd', 'windows_resources_only.cmd'):
         source = (HERE / name).read_text()
         (output / name).write_bytes(source.replace('\n', '\r\n').encode('ascii'))
     result.update(launcher=str(launcher), library=str(library),
-                  start_script=str(output / 'windows_start.cmd'), check_only=True)
+                  start_script=str(output / 'windows_start.cmd'),
+                  steam_script=str(output / 'windows_steam.cmd'), check_only=True)
     return result

@@ -42,9 +42,13 @@ python manage.py windows_build --game-root /path/to/windows/DarkestDungeon --win
 
 构建输出 EXE／DLL 与启动脚本到系统临时目录。Windows 中将这些文件保持在同一目录，保持 Steam 已运行、游戏已正常退出，再双击 `windows_start.cmd`。脚本核对原 EXE，将补丁复制到当前用户的 `%LOCALAPPDATA%\DarkestDungeonPatches\windows_x64\<version>`，运行原生检查并启动；玩家无需 Python 或编译器。正常启动默认启用读取、骨架和七处画布补丁。可向 CMD 传 `-GameRoot <目录>` 指定游戏，`-ResourcesOnly` 隔离测试读取补丁，`-NoNativeRender` 暂停画布补丁；原生 EXE 对应支持 `--resources-only`、`--no-native-render`。
 
+接入 Windows Steam 时，先正常保存退出游戏和 Steam，再双击同目录的 `windows_steam.cmd`，随后打开 Steam，直接点击原游戏的“开始游戏”。安装器自动查找 Steam、最近登录账号和游戏库，也可传 `-SteamRoot`、`-SteamUser`、`-GameRoot` 指定。默认固定安装到 `%LOCALAPPDATA%\DarkestDungeonPatches\steam`，可用 `-InstallRoot` 更改。日常启动只运行该目录中的原生 EXE 和 DLL，不依赖 Python、源码、共享目录或安装脚本。
+
+安装器仅编辑所选账号 AppID `262060` 的启动选项，保留原参数和外层包装器，保存撤销所需的原值。Steam 通过 `"<安装目录>\dd_windows_launcher.exe" --steam %command%` 传入原命令；即使原入口是 32 位，启动器也只运行同一游戏根目录中经身份校验的 x64 EXE。原生入口默认加载三项补丁并脱离启动控制台，日志位于固定安装目录的 `windows_launch.log`。`windows_steam.cmd -Action Preview` 只显示拟安装路径和启动选项；`-Action Status` 查询状态；正常退出游戏和 Steam 后，`-Action Uninstall` 恢复原启动选项并保留补丁文件。安装失败会回滚文件和安装状态，配置已被外部改动则拒绝覆盖。安装器不修改 Defender 设置。Windows Steam 接入已通过临时配置与合成程序检查，尚待实际 Steam 按钮启动验收。
+
 启动器沿用本机 Steam AppID 262060 的原生 Windows 启动配置所带的 `-skipvalidation` 参数；补丁自身始终检查完整 EXE 哈希与原指令。启动器创建自己的调试子进程，经过系统加载断点后停在经核对的 EXE 入口，恢复入口原字节并校验全部目标指令；改写本次内存，加载骨架 DLL，确认 DLL 初始化成功后脱离调试并恢复主线程。不会把 DLL 注入既有进程，不修改磁盘游戏程序，也不跳过游戏断言。该入口避免在系统加载锁仍被持有时等待另一线程加载 DLL。
 
-骨架发现与来源缓存使用 Linux 的共同代码；Windows 适配其存储设备、路径表、原生句柄、角色入口和详情预览。换肤转移原生事件容器的所有权，保留游戏创建的角色回调。支持按实际来源发现资源，不依赖打包路由表。用户已确认 Windows 动态骨架、资源读取和 4K 画布正常；实机日志与只读内存核对显示，三个渲染目标均由 1920×1080 提升至 3840×2160。战斗仍未完成回归，原生启动成功与 DLL 就绪不等于所有场景通过。当前没有写入 Windows Steam 自动启动配置。
+骨架发现与来源缓存使用 Linux 的共同代码；Windows 适配其存储设备、路径表、原生句柄、角色入口和详情预览。换肤转移原生事件容器的所有权，保留游戏创建的角色回调。支持按实际来源发现资源，不依赖打包路由表。用户已确认 Windows 动态骨架、资源读取和 4K 画布正常；实机日志与只读内存核对显示，三个渲染目标均由 1920×1080 提升至 3840×2160。战斗仍未完成回归，原生启动成功与 DLL 就绪不等于所有场景通过。
 
 启动日志在补丁版本目录的 `windows_launch.log`；部署脚本在测试期间最多十分钟将日志复制回交付目录，并写入 `windows_patch_status.json`。关闭控制台会结束日志回传，游戏可继续运行。`DD_WINDOWS_GAME=/path/to/Darkest.exe python -m unittest -v test_windows_port` 校验身份并在模拟设备上隔离执行原 Windows `IO_GetFileInfo` 指令，不执行游戏入口或存档代码。
 

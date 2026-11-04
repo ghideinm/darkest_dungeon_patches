@@ -559,10 +559,25 @@ static int launch_game(const wchar_t *game, wchar_t *command,
   CloseHandle(process.hProcess);
   return success;
 }
+static int steam_game_path(const wchar_t *original, wchar_t game[32768]) {
+  DWORD count = GetFullPathNameW(original, 32768, game, NULL);
+  const wchar_t *x64 = L"\\_windows\\win64\\Darkest.exe";
+  const wchar_t *x86 = L"\\_windows\\Darkest.exe";
+  if (!count || count >= 32768)
+    return 0;
+  size_t length = wcslen(game), size64 = wcslen(x64), size32 = wcslen(x86);
+  if (length >= size64 && !_wcsicmp(game + length - size64, x64))
+    return 1;
+  if (length < size32 || _wcsicmp(game + length - size32, x86) ||
+      length - size32 + size64 >= 32768)
+    return 0;
+  wcscpy(game + length - size32, x64);
+  return 1;
+}
 int wmain(int argc, wchar_t **argv) {
   wchar_t game[32768] = {0}, home[32768], library[32768], command[32768] = {0};
   int check = 0, runtime_rig = 1, native_render = 1, diagnose = 0,
-      remaining = argc;
+      remaining = argc, steam_mode = 0;
   for (int i = 1; i < argc; ++i) {
     if (!wcscmp(argv[i], L"--check"))
       check = 1;
@@ -575,6 +590,12 @@ int wmain(int argc, wchar_t **argv) {
     else if (!wcscmp(argv[i], L"--resources-only")) {
       runtime_rig = 0;
       native_render = 0;
+    } else if (!wcscmp(argv[i], L"--steam") && i + 1 < argc) {
+      if (*game || !steam_game_path(argv[i + 1], game))
+        return 125;
+      steam_mode = 1;
+      remaining = i + 2;
+      break;
     } else if (!wcscmp(argv[i], L"--game") && i + 1 < argc) {
       DWORD count = GetFullPathNameW(argv[++i], 32768, game, NULL);
       if (!count || count >= 32768)
@@ -588,11 +609,14 @@ int wmain(int argc, wchar_t **argv) {
     }
   }
   if (!*game) {
-    fputs("Use --game <Windows x64 Darkest.exe> [--check] "
+    fputs("Use --steam <Steam game command> or --game <Windows x64 "
+          "Darkest.exe> [--check] "
           "[--resources-only] [--no-native-render] [-- game arguments]\n",
           stderr);
     return 125;
   }
+  if (steam_mode)
+    (void)FreeConsole();
   DWORD count = GetModuleFileNameW(NULL, home, 32768);
   if (!count || count >= 32768)
     return 125;

@@ -9,6 +9,131 @@ import tempfile
 import unittest
 
 import windows_port
+import steam_integration as steam
+
+
+class WindowsSteamSetupTest(unittest.TestCase):
+    def run_powershell(self, script, root):
+        runner = os.environ.get('DD_WINDOWS_POWERSHELL')
+        if not runner:
+            self.skipTest('Set DD_WINDOWS_POWERSHELL for Steam setup regressions')
+        path = root / 'test.ps1'
+        path.write_text(script)
+        result = subprocess.run([runner, '-NoLogo', '-NoProfile', '-File', str(path)],
+                                capture_output=True, text=True, timeout=40,
+                                env=dict(os.environ, XDG_CACHE_HOME=str(root / '.cache'),
+                                         XDG_CONFIG_HOME=str(root / '.config'),
+                                         XDG_DATA_HOME=str(root / '.data')))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        import json
+        return json.loads(result.stdout)
+
+    def test_lossless_vdf_roundtrip_and_wrapper_arguments(self):
+        import json
+        with tempfile.TemporaryDirectory(prefix='dd-steam-ps-') as directory:
+            root = Path(directory)
+            source = Path(__file__).with_name('windows_steam.ps1')
+            text = ('// keep comments\n"UserLocalConfigStore" { "Software" { "Valve" { '
+                    '"Steam" { "apps" { "999" { "LaunchOptions" "keep" } '
+                    '"262060" { "Playtime" "42" "LaunchOptions" "-old" } } } } } }')
+            launcher = 'C:\\用户 游戏\\补丁\\dd_windows_launcher.exe'
+            value = '"' + launcher + '" --steam %command%'
+            fixture = root / 'input.json'
+            fixture.write_text(json.dumps({'text': text, 'launcher': launcher,
+                                           'options': value}, ensure_ascii=False))
+            script = (". '" + str(source) + "' -InstallRoot '" + str(root) + "'\n"
+                      "$x=Get-Content -Raw '" + str(fixture) + "'|ConvertFrom-Json\n" + r'''
+$after=Set-SteamLaunchOptions $x.text $x.options
+$missing=$x.text.Replace('"LaunchOptions" "-old"','')
+$inserted=Set-SteamLaunchOptions $missing $x.options
+$withoutApp=$missing.Replace('"262060" { "Playtime" "42"  }','')
+$newApp=Set-SteamLaunchOptions $withoutApp $x.options
+$failures=0
+foreach($bad in @('"broken" {',$x.text.Replace('"LaunchOptions" "-old"','"LaunchOptions" "x" "LaunchOptions" "y"'))){
+ try{Get-SteamLaunchOptions $bad|Out-Null}catch{$failures++}
+}
+try{Get-WrappedLaunchOptions $x.launcher '%command% %command%'|Out-Null}catch{$failures++}
+[ordered]@{after=$after;value=(Get-SteamLaunchOptions $after);inserted=(Get-SteamLaunchOptions $inserted);new_app=(Get-SteamLaunchOptions $newApp);wrapper=(Get-WrappedLaunchOptions $x.launcher '-old');nested=(Get-WrappedLaunchOptions $x.launcher 'outer %command% -old');empty=(Get-WrappedLaunchOptions $x.launcher $null);failures=$failures}|ConvertTo-Json
+''')
+            result = self.run_powershell(script, root)
+            self.assertEqual(result['after'], steam.replace_launch_options(text, value))
+            for key in ('value', 'inserted', 'new_app', 'empty'):
+                self.assertEqual(result[key], value)
+            self.assertEqual(result['wrapper'], value + ' -old')
+            self.assertEqual(result['nested'], 'outer ' + value + ' -old')
+            self.assertEqual(result['failures'], 3)
+
+    def test_install_update_rollback_conflict_and_uninstall(self):
+        import json
+        with tempfile.TemporaryDirectory(prefix='dd-steam-setup with spaces-') as directory:
+            root = Path(directory)
+            package, client, installed = root / 'package', root / 'steam', root / 'installed'
+            package.mkdir()
+            setup = package / 'windows_steam.ps1'
+            setup.write_bytes(Path(__file__).with_name('windows_steam.ps1').read_bytes())
+            native = package / 'dd_windows_launcher.exe'
+            native.write_text('#!/bin/sh\nexit 0\n')
+            native.chmod(0o700)
+            (package / 'dd_skin_rig_patch.dll').write_bytes(b'fixture library')
+            config = client / 'userdata/123/config/localconfig.vdf'
+            config.parent.mkdir(parents=True)
+            original = ('"UserLocalConfigStore" { "Software" { "Valve" { "Steam" { '
+                        '"apps" { "262060" { "LaunchOptions" "-old" } } } } } }')
+            config.write_bytes(b'\xef\xbb\xbf' + original.encode())
+            game_root = root / 'game'
+            game = game_root / '_windows/win64/Darkest.exe'
+            game.parent.mkdir(parents=True)
+            game.write_bytes(b'fixture game')
+            paths = root / 'paths.json'
+            paths.write_text(json.dumps(dict(setup=str(setup), steam=str(client),
+                                            installed=str(installed), game=str(game_root),
+                                            binary=str(game), config=str(config),
+                                            package=str(package))))
+            script = ("$x=Get-Content -Raw '" + str(paths) + "'|ConvertFrom-Json\n" + r'''
+. $x.setup -SteamRoot $x.steam -SteamUser 123 -GameRoot $x.game -InstallRoot $x.installed
+function Get-FileHash {
+ param([string]$LiteralPath,[string]$Algorithm)
+ if($LiteralPath -eq $x.binary){[pscustomobject]@{Hash='4d78fbfaa65b7d002d2208d02da809200f4a5723119521180e30100d6f1a75f2'}}
+ else{Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm}
+}
+function Get-Process {param($Name,$ErrorAction) if($script:busy){[pscustomobject]@{Id=42}}}
+$script:busy=$true;$blocked=$false
+try{Invoke-SteamSetup|Out-Null}catch{$blocked=-not(Test-Path -LiteralPath $x.installed)}
+$script:busy=$false
+$first=Invoke-SteamSetup
+$firstBytes=[IO.File]::ReadAllBytes($x.config)
+$statePath=Join-Path $x.installed 'steam_install.json'
+$stateBytes=[IO.File]::ReadAllBytes($statePath)
+$again=Invoke-SteamSetup
+$same=$first.launch_options -ceq $again.launch_options
+$saved=[IO.File]::ReadAllBytes((Join-Path $x.installed 'dd_windows_launcher.exe'))
+# Simulate a config-write failure after updating binaries and state.
+$realWrite=(Get-Item Function:Write-SteamConfig).ScriptBlock
+function Write-SteamConfig {throw 'fixture disk failure'}
+$source=Join-Path $x.package 'dd_windows_launcher.exe'
+[IO.File]::WriteAllText($source,"#!/bin/sh`n# update`nexit 0`n")
+$failed=$false
+try{Invoke-SteamSetup|Out-Null}catch{$failed=$true}
+$rolledBack=([Convert]::ToBase64String($saved) -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $x.installed 'dd_windows_launcher.exe')))) -and ([Convert]::ToBase64String($stateBytes) -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($statePath))) -and ([Convert]::ToBase64String($firstBytes) -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($x.config)))
+Set-Item Function:Write-SteamConfig $realWrite
+$snapshot=Read-SteamConfig $x.config
+[IO.File]::AppendAllText($x.config,"`n// external edit")
+$race=$false
+try{Write-SteamConfig $x.config $snapshot 'changed'}catch{$race=[IO.File]::ReadAllText($x.config).EndsWith('// external edit')}
+[IO.File]::WriteAllBytes($x.config,$firstBytes)
+$modified=Set-SteamLaunchOptions ([IO.File]::ReadAllText($x.config)) 'manual'
+[IO.File]::WriteAllText($x.config,$modified)
+$Action='Uninstall';$conflict=$false
+try{Invoke-SteamSetup|Out-Null}catch{$conflict=(Get-SteamLaunchOptions ([IO.File]::ReadAllText($x.config))) -eq 'manual'}
+[IO.File]::WriteAllBytes($x.config,$firstBytes)
+$removed=Invoke-SteamSetup
+[ordered]@{blocked=$blocked;same=$same;failed=$failed;rollback=$rolledBack;race=$race;conflict=$conflict;restored=(Get-SteamLaunchOptions ([IO.File]::ReadAllText($x.config)));bom=([IO.File]::ReadAllBytes($x.config)[0] -eq 239);state_removed=(-not(Test-Path -LiteralPath $statePath));enabled=$removed.enabled}|ConvertTo-Json
+''')
+            result = self.run_powershell(script, root)
+            for key in ('blocked', 'same', 'failed', 'rollback', 'race', 'conflict', 'bom', 'state_removed'):
+                self.assertTrue(result[key], key)
+            self.assertEqual(result['restored'], '-old')
+            self.assertFalse(result['enabled'])
 
 
 class WindowsProfileTest(unittest.TestCase):
@@ -235,6 +360,11 @@ int wmain(void) {
 #include "''' + str(project / 'windows_launcher.c') + '''"
 #undef wmain
 int wmain(int argc, wchar_t **argv) {
+  wchar_t mapped[32768];
+  if (!steam_game_path(L"C:\\\\Games With Spaces\\\\_windows\\\\Darkest.exe",mapped) ||
+      _wcsicmp(mapped,L"C:\\\\Games With Spaces\\\\_windows\\\\win64\\\\Darkest.exe") ||
+      !steam_game_path(L"C:\\\\Games With Spaces\\\\_windows\\\\win64\\\\Darkest.exe",mapped) ||
+      steam_game_path(L"C:\\\\Games With Spaces\\\\other.exe",mapped)) return 6;
   if (argc != 3 && argc != 4) return 2;
   wchar_t game[32768], library[32768], directory[32768], command[32768]={0};
   if (!GetFullPathNameW(argv[1],32768,game,NULL) ||
