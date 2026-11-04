@@ -245,6 +245,9 @@ class NativeTextureOverrideTest(unittest.TestCase):
         cls.library.dd_runtime_test_override.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
                                                         ctypes.c_void_p]
         cls.library.dd_runtime_test_override.restype = None
+        cls.library.dd_runtime_test_override_each.argtypes = [ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_char_p), ctypes.c_uint, ctypes.c_void_p]
+        cls.library.dd_runtime_test_override_each.restype = None
         data = game.read_bytes()
         offset = struct.unpack_from('<Q', data, 32)[0]
         size, count = struct.unpack_from('<HH', data, 54)
@@ -365,6 +368,15 @@ class NativeTextureOverrideTest(unittest.TestCase):
                                               b'monsters/other//anim/', self.native_address)
         self.assertTrue(all(path.startswith('monsters/other//anim/') for path, _ in self.requests))
 
+    def test_native_states_receive_distinct_fully_qualified_texture_sources(self):
+        directories = (ctypes.c_char_p * 2)(b'>heroes/highwayman/highwayman_A/anim/',
+            b'>/workshop/blood/heroes/highwayman/highwayman_A/anim/')
+        self.library.dd_runtime_test_override_each(ctypes.addressof(self.sprite),
+                                                   directories, 2, self.native_address)
+        self.assertEqual([name for name, _ in self.requests], [
+            '>heroes/highwayman/highwayman_A/anim/highwayman.sprite.attack_bbpistol.png',
+            '>/workshop/blood/heroes/highwayman/highwayman_A/anim/highwayman.sprite.attack_whiteslice.png'])
+
 
 class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
     """Exercise the production discovery/loading path with controlled native APIs."""
@@ -384,6 +396,14 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         cls.library.dd_runtime_test_sprite.restype = ctypes.c_void_p
         cls.library.dd_runtime_test_matches.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         cls.library.dd_runtime_test_matches.restype = ctypes.c_int
+        cls.library.dd_runtime_test_sprite_at.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        cls.library.dd_runtime_test_sprite_at.restype = ctypes.c_void_p
+        cls.library.dd_runtime_test_texture.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
+                                                       ctypes.c_uint]
+        cls.library.dd_runtime_test_texture.restype = ctypes.c_char_p
+        cls.library.dd_runtime_test_bind_sources.argtypes = [ctypes.c_void_p] * 6
+        cls.library.dd_runtime_test_source.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        cls.library.dd_runtime_test_source.restype = ctypes.c_char_p
 
     def setUp(self):
         super().setUp()
@@ -423,11 +443,14 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
             target.contents.begin = target.contents.end = target.contents.capacity = None
 
         def resolve(storage, mount, request, output, capacity):
-            file = request.decode().rsplit('/', 1)[1]
-            source = self.sources.get(file)
-            if source is None:
-                return False
-            text = (source + request.decode()).encode()
+            if request.startswith(b'>'):
+                text = request[1:]
+            else:
+                file = request.decode().rsplit('/', 1)[1]
+                source = self.sources.get(file)
+                if source is None:
+                    return False
+                text = (source + request.decode()).encode()
             if len(text) >= capacity:
                 return False
             ctypes.memmove(output, text + b'\0', len(text) + 1)
@@ -473,6 +496,101 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         self.library.dd_runtime_test_bind(address - 0x1d744f0, match_callback, destroy_callback,
                                           resolve_callback, load_callback, release_callback,
                                           get_callback, create_callback, name_callback)
+        self.Vector, self.callback = Vector, callback
+
+    def bind_catalog(self, roots=None):
+        ptr = ctypes.c_void_p
+        # Archive-backed Mod indices omit the trailing directory separator;
+        # the base Linux directory enumeration includes it. Keep both entries.
+        self.root_specs = roots if roots is not None else [
+            ('mods/deepseek/', ['alpha_E']),
+            ('mods/blood/', [f'alpha_{c}' for c in 'ABCD'])]
+        self.native_paths = [f'heroes/alpha/alpha_{c}//' for c in 'ABCD'] + [
+            f'heroes/alpha/alpha_{c}/' for c in 'ABCDE']
+        self.path_buffers = [ctypes.create_string_buffer(p.encode()) for p in self.native_paths]
+        self.root_buffers = []
+        for i, (origin, _) in enumerate(self.root_specs):
+            entry = ctypes.create_string_buffer(0x210)
+            ctypes.memmove(entry, origin.encode() + b'\0', len(origin) + 1)
+            struct.pack_into('<Q', entry, 0x200, i + 1)
+            self.root_buffers.append(entry)
+        self.storage = ctypes.create_string_buffer(0x40)
+        struct.pack_into('<Q', self.storage, 0x38, 0x55)
+        ctypes.c_void_p.from_buffer(self.managers, 0).value = ctypes.addressof(self.storage)
+        self.catalog_vectors = []
+
+        def fill(target, names):
+            entries = ((ctypes.c_char * 256) * len(names))()
+            for entry, name in zip(entries, names):
+                entry.value = name.encode()
+            self.catalog_vectors.append(entries)
+            target.contents.begin = ctypes.addressof(entries)
+            target.contents.end = target.contents.capacity = ctypes.addressof(entries) + 256 * len(names)
+
+        def match(target, device, directory, pattern, details, depth, flags):
+            self.assertEqual((directory, details, depth, flags), (b'heroes/alpha/', 0, 0, 0))
+            fill(target, [f'alpha_{c}/' for c in 'ABCD'])
+
+        def archive(device, target, directory, pattern, details, depth, include):
+            fill(target, self.root_specs[device - 1][1])
+
+        callback = self.callback
+        self.library.dd_runtime_test_bind_sources(
+            callback(ctypes.c_uint, [ptr], lambda klass: len(self.path_buffers)),
+            callback(ptr, [ptr, ctypes.c_uint], lambda klass, i: ctypes.addressof(self.path_buffers[i])),
+            callback(None, [ctypes.POINTER(self.Vector), ptr, ctypes.c_char_p,
+                ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_int], match),
+            callback(ctypes.c_uint, [ptr], lambda device: len(self.root_buffers)),
+            callback(ptr, [ptr, ctypes.c_uint], lambda device, i: ctypes.addressof(self.root_buffers[i])),
+            callback(None, [ptr, ctypes.POINTER(self.Vector), ctypes.c_char_p,
+                ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_bool], archive))
+
+    def texture(self, origin, skin, filename):
+        path = self.root / origin / skin / 'anim' / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'texture fixture; native texture parsing is mocked')
+
+    def test_source_catalog_and_render_keys_preserve_base_four_mod_four_and_extra_one(self):
+        self.bind_catalog()
+        expected = [''] * 4 + ['mods/blood/'] * 4 + ['mods/deepseek/']
+        origins = [self.library.dd_runtime_test_source(0x55, i).decode() for i in range(9)]
+        self.assertEqual(origins, expected)
+        for origin in set(origins):
+            self.rig(origin + 'heroes/alpha/anim', action='idle', pages=('idle.png',))
+            self.rig(origin + 'heroes/alpha/anim', action='walk', pages=('walk.png',))
+        for i, origin in enumerate(origins):
+            colour = 'ABCDABCDE'[i]
+            skin = f'heroes/alpha/alpha_{colour}'
+            for file in ['idle.png', 'walk.png']:
+                self.texture(origin, skin, file)
+            self.assertEqual(self.library.dd_runtime_test_sprite_at(skin.encode(), origin.encode()), 0x1234)
+            self.assertEqual(self.loaded[-2][0], f'>{origin}heroes/alpha/anim/alpha.sprite.idle.skel')
+            self.assertEqual(self.library.dd_runtime_test_texture(skin.encode(), origin.encode(), 0).decode(),
+                             f'>{origin}{skin}/anim/')
+
+    def test_catalog_refuses_unmatched_native_entry_order(self):
+        self.bind_catalog()
+        self.path_buffers[0], self.path_buffers[1] = self.path_buffers[1], self.path_buffers[0]
+        self.assertIsNone(self.library.dd_runtime_test_source(0x55, 0))
+
+    def test_pinned_partial_mod_falls_back_to_base_and_dlc_without_other_mod(self):
+        self.bind_catalog(roots=[('dlc/official/', [])])
+        self.rig('mods/chosen/heroes/alpha/anim', action='idle', pages=('idle.png',))
+        self.rig('heroes/alpha/anim', action='walk', pages=('walk.png',))
+        self.rig('dlc/official/heroes/alpha/anim', action='dead', pages=('dead.png',))
+        self.rig('mods/other/heroes/alpha/anim', action='walk', pages=('walk.png',))
+        self.texture('mods/chosen/', self.skin, 'idle.png')
+        self.texture('', self.skin, 'walk.png')
+        self.texture('dlc/official/', self.skin, 'dead.png')
+        self.texture('mods/other/', self.skin, 'walk.png')
+        self.sources = {'walk.png': 'mods/other/'}
+        self.assertEqual(self.library.dd_runtime_test_sprite_at(self.skin.encode(), b'mods/chosen/'), 0x1234)
+        self.assertEqual([item[0] for item in self.loaded], [
+            '>dlc/official/heroes/alpha/anim/alpha.sprite.dead.skel',
+            '>heroes/alpha/anim/alpha.sprite.walk.skel',
+            '>mods/chosen/heroes/alpha/anim/alpha.sprite.idle.skel'])
+        self.assertEqual(self.library.dd_runtime_test_texture(self.skin.encode(), b'mods/chosen/', 1),
+                         b'>heroes/alpha/alpha_E/anim/')
 
     def test_loads_source_keys_and_releases_temporary_native_handles(self):
         self.rig('mods/chosen/heroes/alpha/anim')

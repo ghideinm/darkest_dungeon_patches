@@ -41,7 +41,7 @@ python manage.py steam_install
 
 随后重新打开 Steam，照常点击《暗黑地牢》的“开始游戏”。安装器只为最近登录的 Steam 账号、AppID `262060` 接入启动包装器；已有启动选项会保留。可用 `--steam-root`、`--steam-user` 指定客户端和 userdata 数字账号 ID。安装、更新和撤销时要求 Steam 已退出，避免客户端覆盖配置。
 
-默认固定安装到 `${XDG_DATA_HOME:-~/.local/share}/darkest_dungeon_patches`，可用 `--install-root` 指定；该路径不能包含空白或冒号。安装器预编译两个 SO 和 C11 原生启动器，用版本目录与 `current` 链接切换；日常启动不依赖 Python、Clang、源码目录或 `/tmp` 缓存，需系统提供 coreutils 的 `sha256sum`。每次启动仍校验整个游戏 SHA-256 和全部 25 处原指令，校验失败以 125 拒绝启动。
+默认固定安装到 `${XDG_DATA_HOME:-~/.local/share}/darkest_dungeon_patches`，可用 `--install-root` 指定；该路径不能包含空白或冒号。安装器预编译两个 SO 和 C11 原生启动器，用版本目录与 `current` 链接切换；日常启动不依赖 Python、Clang、源码目录或 `/tmp` 缓存，需系统提供 coreutils 的 `sha256sum`。每次启动仍校验整个游戏 SHA-256 和全部 31 处原指令，校验失败以 125 拒绝启动。
 
 包装器保留 Steam 的原启动命令、运行时包装和参数，将游戏入口选择为已校验的 Linux x86-64 程序，再设置 `LD_PRELOAD` 与三项补丁开关。其他预加载库继续保留，旧 `DD_RIG_MAP` 清除；重复预加载本项目补丁会被拒绝。Steam 游戏入口仍需为原生 Linux 版本。直接绕过 Steam 执行原游戏文件不自动加载补丁。
 
@@ -56,14 +56,13 @@ python manage.py steam_uninstall
 
 ## 运行时骨架来源
 
-1. 用原生 `ActorClass::GetColourVariationPath` 获取选中皮肤的逻辑路径。
-2. 用原生 `FileMatch` 枚举皮肤贴图，再用 `StorageManager::GetFullFilePath` 查询每张贴图实际命中的来源，遵循游戏自己的 Mod 覆盖顺序。
-3. 对每张贴图，在该来源中优先找 `heroes/<hero>/<skin>/anim/*.skel`，再找同一来源的 `heroes/<hero>/anim/*.skel`，最后查本体；读取候选骨架的同名图集，只选择实际引用该贴图的骨架。不同动作可以分别来自本体、官方 DLC 或 Mod，再组合为一个精灵实例。
-4. 用原生存储层的 `>` 前缀明确指定来源，再通过原生骨架工厂、资源管理器和精灵构造函数加载，避免被其他 Mod 再次覆盖；临时资源句柄由原生释放接口回收。
-5. 换肤前核对动画状态和回调；重建实例后保留动画名、时间和原生脚步事件回调。非英雄角色保留原逻辑。
-6. 在原生 `SpineSprite::OverrideAtlasTextures` 入口合并英雄逻辑目录中的重复斜杠，保留末尾分隔符，再交给原生贴图加载逻辑。这样 `heroes/<hero>/<skin>//anim/` 不会绕过按精确路径索引的 Mod 文件，退到本体贴图或生成占位纹理；空目录指针的重置行为不变。
+1. 读取原生 `ActorClass` 的皮肤索引与原始路径。通过原生设备、备用根目录和 archive 的目录枚举，还原每个条目的实际来源，保持原生顺序和去重规则，并逐项核对原始路径。原版 A～D、Mod A～D 和另一个 Mod 的 E 是独立条目；目录中重复的分隔符在来源身份保留后处理。
+2. 在选中条目的来源内发现贴图。缺少的文件只从本体和官方 `dlc/` 目录补齐，不借用其他用户 Mod 的同名文件；随后以原生存储层的 `>` 明确路径查询，防止再被全局 Mod 覆盖。
+3. 对每张贴图，在该来源中优先找 `heroes/<hero>/<skin>/anim/*.skel`，再找同一来源的 `heroes/<hero>/anim/*.skel`，最后查本体；读取候选骨架的同名图集，只选择实际引用该贴图的骨架。不同动作可以分别来自本体、官方 DLC 或选中的 Mod，再组合为一个精灵实例。
+4. 骨架缓存记录来源、皮肤、全部骨架 Key 及对应贴图目录。骨架和贴图 Key 均带 `>` 与完整来源路径；通过原生工厂和精灵构造函数加载，临时骨架句柄由原生接口释放。
+5. 换肤前核对动画状态和回调；重建实例后保留动画名、时间和原生脚步事件回调。角色与预览刷新向贴图入口传递本次条目的来源上下文，再逐个原生 `PerSpineDataState` 指定贴图目录，继续由原生函数管理 Texture 句柄，避免骨架来源正确但贴图仍被全局覆盖。非英雄角色和空指针重置保留原逻辑。
 
-这里的索引是进程内的发现缓存，不依赖打包产生的文件。每次选择皮肤都会重新查询当前存储覆盖结果；不支持在运行中修改骨架内容的热重载。
+这里的索引是进程内的发现缓存，不依赖打包产生的文件。来源缓存签名包括原生皮肤表与备用根目录；无法逐项对应原生顺序时拒绝路由。每次选择仍检查所选来源的实际资源；不支持在运行中修改骨架内容的热重载。
 
 本版本只发现磁盘上的 `.skel` 与同名 `.atlas`，支持标准 PNG/TGA 皮肤目录。损坏的本地骨架不会静默回退；同名骨架被图集的不同页面同时选中却指向不同来源、资源缓存命中其他来源、目标缺少当前动画或角色正忙时，会拒绝换肤并保留旧状态。未被候选图集引用的贴图不参与选组。首次创建角色时若无法确定或加载骨架，会以 125 退出并输出 `DD_RIG_SOURCE_REFUSED` 等诊断。
 
@@ -76,6 +75,9 @@ python manage.py steam_uninstall
 | 接口 | 地址 | 用途 |
 | --- | --- | --- |
 | `FileMatch(StorageMount, ...)` | `0xc27c90` | 枚举皮肤贴图 |
+| `FileMatch(StorageDevice*, ...)` | `0xc27c30` | 在指定来源的设备枚举目录 |
+| `StorageDevice::GetAlternateRootDirectoryCount` / `GetAlternateRootDirectory` | `0xa40930` / `0xa40950` | 获取已挂载来源及顺序 |
+| `StorageDeviceArchive::FindFiles` | `0xa41700` | 使用原生 archive 目录索引 |
 | `StorageManager::GetFullFilePath` | `0xa5a7d0` | 查询命中的 Mod／本体路径 |
 | `StorageManager::IO_GetFileInfo` | `0xa5c2d0` | 按覆盖顺序查询；`>` 跳过覆盖搜索 |
 | `SpineDataFactory::CreateSpineData` | `0xc3a260` | 通过来源路径创建原生骨架句柄 |
@@ -83,7 +85,7 @@ python manage.py steam_uninstall
 | `delete_SpineData` | `0xa63a60` | 释放临时骨架句柄 |
 | `SpineSprite::OverrideAtlasTextures` | `0xa70e10` | 规范英雄贴图目录后执行原生换肤 |
 
-`test_runtime_rig.py` 覆盖来源搜索、冲突拒绝、资源键、句柄回收和无需配置的启动入口；另从已校验的游戏文件中提取 `IO_GetFileInfo` 与 `OverrideAtlasTextures` 指令，在模拟存储设备和资源句柄上隔离执行，验证原生覆盖顺序、`>` 分支与重复分隔符导致的贴图缺失。该测试不执行游戏入口、初始化、图形或存档代码，不能替代实际游戏验证。不提交商业资源或提取的完整函数指令。
+`test_runtime_rig.py` 覆盖来源搜索、冲突拒绝、完整资源键、句柄回收和无需配置的启动入口，包括原版四张、同名 Mod 四张及额外一张的九条独立来源回归、错误顺序拒绝和受限回退；另从已校验的游戏文件中提取 `IO_GetFileInfo` 与 `OverrideAtlasTextures` 指令，在模拟存储设备和资源句柄上隔离执行，验证原生覆盖顺序、`>` 分支、重复分隔符和逐动作来源目录。该测试不执行游戏入口、初始化、图形或存档代码，不能替代实际游戏验证。不提交商业资源或提取的完整函数指令。
 
 ## 安装与可选旧式打包
 
