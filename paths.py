@@ -9,9 +9,5 @@ DEFAULT_GAME_ROOT = (
 )
 
 
-def hero_root(project_root: Path) -> Path:
-    return project_root.expanduser().resolve() / "游戏模组/DeepSeek强盗"
-
-
 def bridge_root(project_root: Path) -> Path:
     return project_root.expanduser().resolve().parent / "darkest_dungeon_mcp"

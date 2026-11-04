@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 from paths import DEFAULT_GAME_ROOT, DEFAULT_PROJECT_ROOT, bridge_root as project_bridge_root
+from skin_config import read_rig_map
 EXPECTED_SHA256 = 'fe1a629f7afa74e716cb440b14db6470d572ed244e0a2420521e521bc1102156'
 SITES = [0xc3c288, 0xc3c343, 0xc3c3fa, 0xc3c4b1, 0xc3c568, 0xc3c61f, 0xc3f77f]
 RENDER_SITES = [(0xca13ca, bytes.fromhex('bd 80 07 00 00')),
@@ -104,6 +105,7 @@ def main():
     rig_library = None
     if args.rig_map:
         args.rig_map = args.rig_map.resolve(strict=True)
+        read_rig_map(args.rig_map)
         rig_library = build_library('skin_rig_patch.c', 'libdd_skin_rig_patch.so')
         report.update(rig_routing_experimental=True, rig_map=str(args.rig_map), rig_library=str(rig_library))
     if args.check:

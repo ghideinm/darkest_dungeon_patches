@@ -6,7 +6,7 @@
   "scripts": {
     "format": "clang-format -i *.c",
     "check:format": "clang-format --dry-run --Werror *.c",
-    "check:tidy": "clang-tidy *.c --warnings-as-errors='*' -- -std=c11 -Wall -Wextra -Werror && clang-tidy resource_loading_patch.c --warnings-as-errors='*' -- -std=c11 -Wall -Wextra -Werror -DDD_PATCH_SELFTEST",
+    "check:tidy": "clang-tidy *.c --warnings-as-errors='*' -- -std=c11 -Wall -Wextra -Werror && clang-tidy *.c --warnings-as-errors='*' -- -std=c11 -Wall -Wextra -Werror -DDD_PATCH_SELFTEST",
     "check": "pnpm run check:format && pnpm run check:tidy",
     "prepare": "husky"
   },

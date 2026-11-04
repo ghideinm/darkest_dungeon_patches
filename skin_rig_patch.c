@@ -18,17 +18,99 @@ typedef struct {
   Handle *begin, *end, *capacity;
 } Handles;
 typedef struct {
-  char skin[256], group[64], prefix[160];
+  char skin[256], hero[256], group[64], prefix[160];
+  int tested;
 } Route;
 static Route routes[128];
 static size_t route_count;
+
+static int same_hero(const Route *a, const Route *b) {
+  return a && b && !strcmp(a->hero, b->hero);
+}
+static int same_group(const Route *a, const Route *b) {
+  return same_hero(a, b) && !strcmp(a->group, b->group);
+}
+static const Route *route_for_name(const char *name, const Route *scope) {
+  if (!name || !scope)
+    return NULL;
+  const char *hero_path = strstr(name, "heroes/");
+  if (hero_path && (hero_path == name || hero_path[-1] == '/')) {
+    size_t n = strlen(scope->hero);
+    if (strncmp(hero_path, scope->hero, n) || hero_path[n] != '/')
+      return NULL;
+  }
+  const char *leaf = strrchr(name, '/');
+  leaf = leaf ? leaf + 1 : name;
+  const Route *best = NULL;
+  size_t length = 0;
+  for (size_t i = 0; i < route_count; ++i) {
+    size_t n = strlen(routes[i].prefix);
+    if (same_hero(scope, routes + i) && n > length &&
+        !strncmp(leaf, routes[i].prefix, n)) {
+      best = routes + i;
+      length = n;
+    }
+  }
+  return best;
+}
+static int valid_token(const char *text) {
+  if (!((*text >= 'A' && *text <= 'Z') || (*text >= 'a' && *text <= 'z') ||
+        (*text >= '0' && *text <= '9') || *text == '_'))
+    return 0;
+  for (const char *p = text; *p; ++p)
+    if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+          (*p >= '0' && *p <= '9') || *p == '_' || *p == '.' || *p == '-'))
+      return 0;
+  return 1;
+}
+static int read_routes(FILE *file) {
+  route_count = 0;
+  char line[1024];
+  while (fgets(line, sizeof(line), file)) {
+    if (!strchr(line, '\n') && !feof(file))
+      return 0;
+    const char *p = line;
+    while (*p && strchr(" \t\r\n\v\f", *p))
+      ++p;
+    if (!*p || *p == '#')
+      continue;
+    Route route = {0};
+    char extra;
+    if (route_count == 128 ||
+        sscanf(p, "%255s %63s %159s %c", route.skin, route.group, route.prefix,
+               &extra) != 3 ||
+        strncmp(route.skin, "heroes/", 7) || !valid_token(route.group) ||
+        !valid_token(route.prefix))
+      return 0;
+    char *separator = strchr(route.skin + 7, '/');
+    if (!separator || !valid_token(separator + 1))
+      return 0;
+    size_t length = (size_t)(separator - route.skin);
+    memcpy(route.hero, route.skin, length);
+    if (!valid_token(route.hero + 7))
+      return 0;
+    for (size_t i = 0; i < route_count; ++i) {
+      if (!strcmp(routes[i].skin, route.skin))
+        return 0;
+      if (same_hero(routes + i, &route) &&
+          ((!strcmp(routes[i].group, route.group) &&
+            strcmp(routes[i].prefix, route.prefix)) ||
+           (!strcmp(routes[i].prefix, route.prefix) &&
+            strcmp(routes[i].group, route.group))))
+        return 0;
+    }
+    routes[route_count++] = route;
+  }
+  return !ferror(file) && route_count > 0;
+}
+
+#ifndef DD_PATCH_SELFTEST
 static uintptr_t base;
 static void (*original_colour)(void *, int);
 static void (*original_preview)(void *, void *);
 static void *(*native_new)(const Handles *, int);
 static const char *(*resource_name)(void *, const Handle *);
 static void (*set_animation)(void *, const char *, int, int);
-static int native_test_done;
 
 static void *pointer_at(const void *p, size_t offset) {
   void *v;
@@ -66,26 +148,10 @@ static const Route *find_route(void *actor, int colour) {
       return routes + i;
   return NULL;
 }
-static const Route *resource_route(const Handle *handle) {
+static const Route *resource_route(const Handle *handle, const Route *scope) {
   void *manager = *(void **)(base + 0x31c2b58);
   const char *name = resource_name(manager, handle);
-  if (!name)
-    return NULL;
-  const char *leaf = strrchr(name, '/');
-  leaf = leaf ? leaf + 1 : name;
-  const Route *best = NULL;
-  size_t length = 0;
-  for (size_t i = 0; i < route_count; ++i) {
-    size_t n = strlen(routes[i].prefix);
-    if (n > length && !strncmp(leaf, routes[i].prefix, n)) {
-      best = routes + i;
-      length = n;
-    }
-  }
-  return best;
-}
-static int same_group(const Route *a, const Route *b) {
-  return a && b && !strcmp(a->group, b->group);
+  return route_for_name(name, scope);
 }
 static size_t select_handles(void *klass, const Route *route, Handle *out,
                              size_t limit) {
@@ -94,7 +160,7 @@ static size_t select_handles(void *klass, const Route *route, Handle *out,
     return 0;
   size_t count = 0;
   for (const Handle *h = all->begin; h < all->end; ++h) {
-    if (!same_group(route, resource_route(h)))
+    if (!same_group(route, resource_route(h, route)))
       continue;
     if (count == limit)
       return 0;
@@ -121,7 +187,7 @@ static int sprite_matches(void *sprite, const Route *route) {
   const Handle *first = pointer_at(sprite, 0x20);
   if (!first || (void *)first == pointer_at(sprite, 0x28))
     return 0;
-  return same_group(resource_route(first), route);
+  return same_group(resource_route(first, route), route);
 }
 static void discard_sprite(void *sprite) {
   void (*destroy)(void **) = (void *)(base + 0xa6f170);
@@ -141,11 +207,13 @@ static void start_animation(void *sprite, const char *name, float time) {
   if (isfinite(time) && time >= 0 && seconds > 0)
     set_time(sprite, fmodf(time, seconds));
 }
-static void native_two_sprite_test(void *klass) {
-  if (native_test_done)
+static void native_two_sprite_test(void *klass, const Route *scope) {
+  if (scope->tested)
     return;
   const Route *a = NULL, *b = NULL;
   for (size_t i = 0; i < route_count; ++i) {
+    if (!same_hero(scope, routes + i))
+      continue;
     if (!a)
       a = routes + i;
     else if (!same_group(a, routes + i)) {
@@ -159,7 +227,9 @@ static void native_two_sprite_test(void *klass) {
   if (!select_handles(klass, a, probe, 256) ||
       !select_handles(klass, b, probe, 256))
     return;
-  native_test_done = 1;
+  for (size_t i = 0; i < route_count; ++i)
+    if (same_hero(scope, routes + i))
+      routes[i].tested = 1;
   void *left = make_sprite(klass, a), *right = make_sprite(klass, b);
   if (left && right) {
     set_animation(left, "idle", 1, 1);
@@ -193,7 +263,7 @@ static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
     return native_new(original, flag);
   dprintf(2, "DD_RIG_ACTOR_INIT actor=%p sprite=%p skin=%s group=%s\n", actor,
           sprite, route->skin, route->group);
-  native_two_sprite_test(klass);
+  native_two_sprite_test(klass, route);
   return sprite;
 }
 static void change_colour(void *actor, int colour) {
@@ -315,18 +385,9 @@ __attribute__((constructor)) static void init(void) {
   FILE *file = fopen(map, "r");
   if (!file)
     _exit(125);
-  char line[1024];
-  while (fgets(line, sizeof(line), file)) {
-    if (line[0] == '#' || line[0] == '\n')
-      continue;
-    if (route_count == 128 ||
-        sscanf(line, "%255s %63s %159s", routes[route_count].skin,
-               routes[route_count].group, routes[route_count].prefix) != 3)
-      _exit(125);
-    ++route_count;
-  }
+  int valid = read_routes(file);
   fclose(file);
-  if (!route_count)
+  if (!valid)
     _exit(125);
   uintptr_t sites[3] = {base + 0xefc214, base + 0xd66e80, base + 0x11a8400};
   const unsigned char expected[3][10] = {
@@ -382,3 +443,45 @@ __attribute__((constructor)) static void init(void) {
       "DD_RIG_PATCH_APPLIED routes=%zu body=instance preview=selected_hero\n",
       route_count);
 }
+#else
+static int test_map(const char *text) {
+  FILE *file = fmemopen((void *)text, strlen(text), "r");
+  if (!file)
+    return 0;
+  int result = read_routes(file);
+  fclose(file);
+  return result;
+}
+int main(void) {
+  if (!test_map("  # shared group names and prefixes across classes\n\n"
+                "heroes/alpha/alpha_A vanilla common.rig_vanilla.\n"
+                "heroes/alpha/alpha_B custom common.\n"
+                "heroes/alpha/alpha_C vanilla common.rig_vanilla.\n"
+                "heroes/beta/beta_A vanilla common.rig_vanilla.\n"
+                "heroes/beta/beta_B custom common.\n"))
+    return 1;
+  if (same_group(routes, routes + 3) || !same_group(routes, routes + 2) ||
+      route_for_name("anim/common.rig_vanilla.idle.skel", routes + 4) !=
+          routes + 3 ||
+      route_for_name("common.idle.skel", routes) != routes + 1 ||
+      route_for_name("heroes/alpha/anim/common.idle.skel", routes + 3) ||
+      route_for_name("heroes/beta/anim/common.idle.skel", routes + 3) !=
+          routes + 4 ||
+      route_for_name("unmapped.idle.skel", routes))
+    return 2;
+  const char *invalid[] = {"heroes/alpha/alpha_A vanilla common. extra\n",
+                           "heroes/alpha/../alpha_A vanilla common.\n",
+                           "heroes/alpha/alpha_A vanilla common.\n"
+                           "heroes/alpha/alpha_A custom other.\n",
+                           "heroes/alpha/alpha_A vanilla common.\n"
+                           "heroes/alpha/alpha_B custom common.\n",
+                           "heroes/alpha/alpha_A vanilla common.\n"
+                           "heroes/alpha/alpha_B vanilla other.\n"};
+  for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i)
+    if (test_map(invalid[i]))
+      return 3;
+  puts("RIG_SELFTEST_PASS: hero-scoped groups, longest prefixes and invalid "
+       "maps");
+  return 0;
+}
+#endif
