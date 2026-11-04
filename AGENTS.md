@@ -1,6 +1,6 @@
 # 开发约定
 
-- 默认中文。仅维护 Linux 28212 的资源读取、原生画布和皮肤骨架路由补丁。
+- 默认中文。维护 Linux 28212 的资源读取、原生画布和皮肤骨架路由补丁，以及用户授权的 Windows x64 对应迁移；各平台独立校验版本与指令。
 - 目录及源码、脚本、配置使用 snake_case；统一入口是 `manage.py`，底层启动器是 `launch.py`。
 - C11 使用 Clang，保留 `-Wall -Wextra -Werror`。不随路径整理更改原生地址、指令或补丁开关。
 - 使用 `pnpm format` 应用 LLVM 默认格式，提交前通过 `pnpm check`（clang-format／clang-tidy）。Husky 管理 Hook，commitlint 继承 Conventional Commits；ESM 配置使用 `export default`，不新增自定义消息规则。

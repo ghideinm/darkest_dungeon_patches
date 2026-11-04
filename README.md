@@ -1,6 +1,6 @@
 # Darkest Dungeon Patches
 
-《暗黑地牢》Linux 28212 的独立原生补丁项目。统一入口为 `manage.py`，Python 只用标准库，C11 使用 Clang 编译。
+《暗黑地牢》Linux 28212 的独立原生补丁项目，附 Windows x64 迁移测试版。统一开发入口为 `manage.py`，Python 只用标准库，C11 使用 Clang 编译。
 
 | 功能 | 入口与范围 |
 | --- | --- |
@@ -30,6 +30,25 @@ python launch.py --native-render
 ```
 
 `manage.py --game-root <目录>` 指定游戏根目录；`launch.py --game <程序>` 指定原生可执行文件。最后一条仅启用读取与画布补丁。
+
+## Windows x64 迁移测试版
+
+仅适配 Steam Windows x64、SHA-256 为 `4d78fbfaa65b7d002d2208d02da809200f4a5723119521180e30100d6f1a75f2` 的 EXE。32 位版、大内存补丁改写过的 EXE 和其他版本均拒绝加载。Windows 原版有 12 个 16 MiB 读取缓冲，本补丁同步改写分配与两处读取容量为 32 MiB，总容量上限为 384 MiB。
+
+```sh
+python manage.py windows_check --game-root /path/to/windows/DarkestDungeon
+python manage.py windows_build --game-root /path/to/windows/DarkestDungeon --windows-cc /path/to/x86_64-w64-mingw32-clang
+```
+
+构建输出 EXE／DLL 与启动脚本到系统临时目录。Windows 中将这些文件保持在同一目录，保持 Steam 已运行、游戏已正常退出，再双击 `windows_start.cmd`。脚本核对原 EXE，将补丁复制到当前用户的 `%LOCALAPPDATA%\DarkestDungeonPatches\windows_x64\<version>`，运行原生检查并启动；玩家无需 Python 或编译器。可向 CMD 传 `-GameRoot <目录>` 指定游戏，`-ResourcesOnly` 隔离测试读取补丁，`-NativeRender` 启用已定位的七处画布补丁。
+
+启动器创建自己的调试子进程，经过系统加载断点后停在经核对的 EXE 入口，恢复入口原字节并校验全部目标指令；改写本次内存，加载骨架 DLL，确认 DLL 初始化成功后脱离调试并恢复主线程。不会把 DLL 注入既有进程，不修改磁盘游戏程序，也不跳过游戏断言。该入口避免在系统加载锁仍被持有时等待另一线程加载 DLL。
+
+骨架发现与来源缓存使用 Linux 的共同代码；Windows 适配其存储设备、路径表、原生句柄、角色入口和详情预览。换肤转移原生事件容器的所有权，保留游戏创建的角色回调。支持按实际来源发现资源，不依赖打包路由表。该版本仍需在 Windows 游戏中验证换肤、战斗和画布表现；原生启动成功与 DLL 就绪不等于画面通过。当前没有写入 Windows Steam 自动启动配置。
+
+启动日志在补丁版本目录的 `windows_launch.log`；部署脚本在测试期间最多十分钟将日志复制回交付目录，并写入 `windows_patch_status.json`。关闭控制台会结束日志回传，游戏可继续运行。`DD_WINDOWS_GAME=/path/to/Darkest.exe python -m unittest -v test_windows_port` 校验身份并在模拟设备上隔离执行原 Windows `IO_GetFileInfo` 指令，不执行游戏入口或存档代码。
+
+提前退出时运行 `windows_diagnose.cmd`：加载后继续观察本次子进程二十秒，记录异常地址、寄存器、栈和退出码；异常仍交给原系统处理，不跳过断言。`windows_resources_only.cmd` 用同样的诊断只测试读取补丁。脚本还会回传游戏根目录的 `app.log` 为 `windows_game_app.log`。Windows 实机首轮曾在补丁初始化后提前退出，原因仍在定位；当前不能视为实机验收通过。
 
 ## Steam 自动加载
 

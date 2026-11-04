@@ -4,8 +4,8 @@
   "private": true,
   "description": "Native Linux engine patches for Darkest Dungeon",
   "scripts": {
-    "format": "clang-format -i *.c",
-    "check:format": "clang-format --dry-run --Werror *.c",
+    "format": "clang-format -i *.c *.h",
+    "check:format": "clang-format --dry-run --Werror *.c *.h",
     "check:tidy": "clang-tidy *.c --warnings-as-errors='*' -- -std=c11 -Wall -Wextra -Werror && clang-tidy *.c --warnings-as-errors='*' -- -std=c11 -Wall -Wextra -Werror -DDD_PATCH_SELFTEST",
     "check": "pnpm run check:format && pnpm run check:tidy",
     "prepare": "husky"

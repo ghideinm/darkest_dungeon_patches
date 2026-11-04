@@ -1,8 +1,6 @@
 #define _GNU_SOURCE
 #include <dirent.h>
-#include <dlfcn.h>
 #include <errno.h>
-#include <link.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -11,11 +9,32 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* Linux28212 only. Launcher verifies the full executable hash. */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <stdarg.h>
+#include <windows.h>
+#define DD_STORAGE_ADDRESS 0x1174ac8
+#define DD_RESOURCE_ADDRESS 0x117d858
+#define DD_ACTOR_SPRITE_OFFSET 0x1050
+#define DD_CLASS_VTABLE_OFFSET 0x30
+#define DD_FUNCTION_WORDS 8
+static int windows_log(int descriptor, const char *format, ...);
+#define dprintf windows_log
+#else
+#include <dlfcn.h>
+#include <link.h>
+#include <sys/mman.h>
+#define DD_STORAGE_ADDRESS 0x1d744f0
+#define DD_RESOURCE_ADDRESS 0x31c2b58
+#define DD_ACTOR_SPRITE_OFFSET 0x1070
+#define DD_CLASS_VTABLE_OFFSET 0x38
+#define DD_FUNCTION_WORDS 4
+#endif
+
+/* Both launchers verify the full executable hash before native hooks run. */
 typedef struct {
   int index, generation;
   void *cached;
@@ -367,7 +386,7 @@ static int int_at(const void *p, size_t offset) {
 }
 static void *actor_class(void *actor) {
   void *table = pointer_at(actor, 0);
-  void *(*get_class)(void *) = pointer_at(table, 0x38);
+  void *(*get_class)(void *) = pointer_at(table, DD_CLASS_VTABLE_OFFSET);
   return get_class(actor);
 }
 typedef struct {
@@ -383,8 +402,12 @@ static SkinCatalog catalogs[128];
 static size_t catalog_count;
 
 static void *data_device(void) {
-  void *storage = *(void **)(base + 0x1d744f0);
+  void *storage = *(void **)(base + DD_STORAGE_ADDRESS);
+#ifdef _WIN32
+  return storage ? pointer_at(storage, 0x18) : NULL;
+#else
   return storage ? pointer_at(storage, 0x38) : NULL;
+#endif
 }
 static uint64_t hash_bytes(uint64_t hash, const void *bytes, size_t count) {
   const unsigned char *p = bytes;
@@ -440,8 +463,13 @@ static const SkinCatalog *source_catalog(void *klass) {
   hero[end - first] = 0;
   if (!path_join(directory, sizeof(directory), hero, "/"))
     return NULL;
+#ifdef _WIN32
+  int n =
+      snprintf(pattern, sizeof(pattern), "(.*)%s_([A-Z])(\\\\|/)", hero + 7);
+#else
   int n = snprintf(pattern, sizeof(pattern), "(.*)%s_([A-Z])(\\\\\\\\|/)",
                    hero + 7);
+#endif
   if (n < 0 || (size_t)n >= sizeof(pattern))
     return NULL;
   uint64_t signature = UINT64_C(14695981039346656037);
@@ -631,7 +659,7 @@ static const Route *runtime_route(const char *skin, const char *origin) {
   }
   ptrdiff_t count = files.begin ? files.end - files.begin : 0;
   valid = valid && count > 0 && count <= 4096;
-  void *storage = *(void **)(base + 0x1d744f0);
+  void *storage = *(void **)(base + DD_STORAGE_ADDRESS);
   for (ptrdiff_t i = 0; valid && i < count; ++i) {
     char request[512], actual[512] = {0};
     RigPlan candidates = {0};
@@ -736,7 +764,7 @@ static const Route *find_route(void *actor, int colour) {
   return NULL;
 }
 static const Route *resource_route(const Handle *handle, const Route *scope) {
-  void *manager = *(void **)(base + 0x31c2b58);
+  void *manager = *(void **)(base + DD_RESOURCE_ADDRESS);
   const char *name = resource_name(manager, handle);
   return route_for_name(name, scope);
 }
@@ -759,8 +787,9 @@ static void *make_sprite(void *klass, const Route *route) {
   Handle selected[256];
   if (route->plan) {
     size_t count = route->plan->count, loaded = 0;
-    void *manager = *(void **)(base + 0x31c2b58);
-    const uint64_t empty_callback[4] __attribute__((aligned(16))) = {0};
+    void *manager = *(void **)(base + DD_RESOURCE_ADDRESS);
+    const uint64_t empty_callback[DD_FUNCTION_WORDS]
+        __attribute__((aligned(16))) = {0};
     int valid = 1;
     for (size_t i = 0; valid && i < count; ++i) {
       const char *key = route->plan->keys[i];
@@ -803,7 +832,7 @@ static int sprite_matches(void *sprite, const Route *route) {
     if (end < begin || (end - begin) % 0x30 ||
         (end - begin) / 0x30 != route->plan->count)
       return 0;
-    void *manager = *(void **)(base + 0x31c2b58);
+    void *manager = *(void **)(base + DD_RESOURCE_ADDRESS);
     for (size_t i = 0; i < route->plan->count; ++i) {
       const Handle *handle = (const void *)(begin + i * 0x30);
       const char *name = resource_name(manager, handle);
@@ -967,6 +996,9 @@ void dd_runtime_test_override_each(void *sprite, const char **directories,
   override_each(sprite, &plan);
 }
 #endif
+#ifdef _WIN32
+#include "skin_rig_windows.h"
+#else
 static void discard_sprite(void *sprite) {
   void (*destroy)(void **) = (void *)(base + 0xa6f170);
   destroy(&sprite); /* native deferred deletion, not a foreign free */
@@ -1051,7 +1083,7 @@ static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
 }
 static void change_colour(void *actor, int colour) {
   const Route *route = find_route(actor, colour);
-  void *old = pointer_at(actor, 0x1070);
+  void *old = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
   if (!route && runtime_enabled && runtime_actor(actor))
     return;
   if (!route || !old || sprite_matches(old, route)) {
@@ -1289,6 +1321,7 @@ __attribute__((constructor)) static void init(void) {
           "preview=selected_hero\n",
           runtime_enabled ? "runtime_source" : "map", route_count);
 }
+#endif /* platform native hooks */
 #else
 static int test_map(const char *text) {
   FILE *file = fmemopen((void *)text, strlen(text), "r");

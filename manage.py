@@ -1,4 +1,4 @@
-"""三项补丁的统一安装／检查／启动入口；只支持已核对的 Linux 28212。"""
+"""Linux 补丁统一入口，以及已核对 Windows x64 的离线检查／交叉编译。"""
 from __future__ import annotations
 
 import argparse
@@ -84,7 +84,8 @@ def install_package(package, destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['check', 'install', 'launch', 'restore',
-                                           'steam_install', 'steam_status', 'steam_uninstall'])
+                                           'steam_install', 'steam_status', 'steam_uninstall',
+                                           'windows_check', 'windows_build'])
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--source', type=Path, help='原始 Mod 发布包；覆盖配置中的 source')
     parser.add_argument('--project-root', type=Path, default=DEFAULT_PROJECT_ROOT)
@@ -96,7 +97,16 @@ def main():
     parser.add_argument('--steam-root', type=Path, default=Path.home() / '.local/share/Steam')
     parser.add_argument('--steam-user', help='Steam userdata 数字账号 ID；默认选择最近登录账号')
     parser.add_argument('--install-root', type=Path, help='Steam 原生启动器与预编译补丁的固定安装目录')
+    parser.add_argument('--windows-cc', help='Windows x64 LLVM-MinGW Clang 编译器路径')
     args = parser.parse_args()
+    if args.action.startswith('windows_'):
+        import windows_port
+
+        game = args.game_root.expanduser().resolve() / '_windows/win64/Darkest.exe'
+        result = (windows_port.build(game, args.windows_cc)
+                  if args.action == 'windows_build' else windows_port.validate(game))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     if args.action.startswith('steam_'):
         from steam_integration import default_install_root, integrate
 
