@@ -339,6 +339,42 @@ static void report_exception(const PROCESS_INFORMATION *process,
   if (thread)
     CloseHandle(thread);
 }
+static int read_game_memory(HANDLE process, uintptr_t address, void *out,
+                            size_t length) {
+  SIZE_T read;
+  return ReadProcessMemory(process, (void *)address, out, length, &read) &&
+         read == length;
+}
+static void report_target_node(HANDLE process, uintptr_t node, unsigned depth,
+                               unsigned *count) {
+  unsigned char data[0x30];
+  if (!node || depth > 32 || *count >= 128 ||
+      !read_game_memory(process, node, data, sizeof(data)) || data[0x19])
+    return;
+  uintptr_t left, right, target;
+  uint32_t key, width, height;
+  memcpy(&left, data, sizeof(left));
+  memcpy(&right, data + 0x10, sizeof(right));
+  memcpy(&key, data + 0x20, sizeof(key));
+  memcpy(&target, data + 0x28, sizeof(target));
+  ++*count;
+  report_target_node(process, left, depth + 1, count);
+  if (target &&
+      read_game_memory(process, target + 0xc, &width, sizeof(width)) &&
+      read_game_memory(process, target + 0x10, &height, sizeof(height)))
+    report("DD_WINDOWS_RENDER_TARGET key=%08x width=%u height=%u\n", key, width,
+           height);
+  report_target_node(process, right, depth + 1, count);
+}
+static void report_render_targets(HANDLE process, uintptr_t image) {
+  uintptr_t manager, head, root;
+  if (read_game_memory(process, image + 0x1174ad0, &manager, sizeof(manager)) &&
+      manager && read_game_memory(process, manager, &head, sizeof(head)) &&
+      head && read_game_memory(process, head + 8, &root, sizeof(root))) {
+    unsigned count = 0;
+    report_target_node(process, root, 0, &count);
+  }
+}
 static int observe_startup(const PROCESS_INFORMATION *process,
                            uintptr_t image) {
   ULONGLONG deadline = GetTickCount64() + 20000;
@@ -368,6 +404,7 @@ static int observe_startup(const PROCESS_INFORMATION *process,
     if (exited)
       return 0;
   }
+  report_render_targets(process->hProcess, image);
   report("DD_WINDOWS_STARTUP_OBSERVED seconds=20\n");
   return 1;
 }
@@ -524,18 +561,21 @@ static int launch_game(const wchar_t *game, wchar_t *command,
 }
 int wmain(int argc, wchar_t **argv) {
   wchar_t game[32768] = {0}, home[32768], library[32768], command[32768] = {0};
-  int check = 0, runtime_rig = 1, native_render = 0, diagnose = 0,
+  int check = 0, runtime_rig = 1, native_render = 1, diagnose = 0,
       remaining = argc;
   for (int i = 1; i < argc; ++i) {
     if (!wcscmp(argv[i], L"--check"))
       check = 1;
     else if (!wcscmp(argv[i], L"--native-render"))
       native_render = 1;
+    else if (!wcscmp(argv[i], L"--no-native-render"))
+      native_render = 0;
     else if (!wcscmp(argv[i], L"--diagnose"))
       diagnose = 1;
-    else if (!wcscmp(argv[i], L"--resources-only"))
+    else if (!wcscmp(argv[i], L"--resources-only")) {
       runtime_rig = 0;
-    else if (!wcscmp(argv[i], L"--game") && i + 1 < argc) {
+      native_render = 0;
+    } else if (!wcscmp(argv[i], L"--game") && i + 1 < argc) {
       DWORD count = GetFullPathNameW(argv[++i], 32768, game, NULL);
       if (!count || count >= 32768)
         return 125;
@@ -549,7 +589,7 @@ int wmain(int argc, wchar_t **argv) {
   }
   if (!*game) {
     fputs("Use --game <Windows x64 Darkest.exe> [--check] "
-          "[--resources-only] [-- game arguments]\n",
+          "[--resources-only] [--no-native-render] [-- game arguments]\n",
           stderr);
     return 125;
   }
@@ -602,6 +642,14 @@ int wmain(int argc, wchar_t **argv) {
     *slash = 0;
   }
   valid = append_argument(command, 32768, game);
+  int has_steam_default = 0;
+  for (int i = remaining; i < argc; ++i)
+    if (!wcscmp(argv[i], L"-skipvalidation"))
+      has_steam_default = 1;
+  /* App 262060's native Windows launch configuration supplies this flag.
+   * Retain Steam's normal startup contract when launching the verified EXE. */
+  if (valid && !has_steam_default)
+    valid = append_argument(command, 32768, L"-skipvalidation");
   for (int i = remaining; valid && i < argc; ++i)
     valid = append_argument(command, 32768, argv[i]);
   /* The Steam client must already be running. This does not replace Steam's

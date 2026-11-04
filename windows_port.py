@@ -80,7 +80,7 @@ def validate(game: Path):
             'rig_hook_sites': len(tables['hook']),
             'rig_api_sites': len(tables['api']), 'routing_mode': 'runtime_source',
             'render_patch_sites': len(tables['render']),
-            'native_render_opt_in': True, 'disk_binary_modified': False,
+            'native_render_enabled_by_default': True, 'disk_binary_modified': False,
             'runtime_verified': False}
 
 

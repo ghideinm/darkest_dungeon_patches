@@ -252,7 +252,7 @@ static unsigned char *windows_near_page(void) {
   }
   return NULL;
 }
-static int windows_patch_init(void) {
+static __attribute__((noinline)) int windows_patch_init(void) {
   base = (uintptr_t)GetModuleHandleW(NULL);
   const IMAGE_DOS_HEADER *dos = (const void *)base;
   if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 64 ||
@@ -263,7 +263,9 @@ static int windows_patch_init(void) {
       pe->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
       pe->OptionalHeader.SizeOfImage != DD_WINDOWS_IMAGE_SIZE)
     return 0;
-  wchar_t log_path[32768];
+  /* Thread-attach notifications can arrive on the game's 64 KiB worker
+   * stacks. Never let this long-path buffer become a DllMain stack frame. */
+  static wchar_t log_path[32768];
   DWORD count = GetEnvironmentVariableW(L"DD_WINDOWS_PATCH_LOG", log_path,
                                         (DWORD)(sizeof(log_path) / 2));
   if (count && count < sizeof(log_path) / 2)

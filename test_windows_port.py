@@ -177,7 +177,20 @@ int exercise(uintptr_t address) {
         with tempfile.TemporaryDirectory(prefix='dd-windows-bootstrap-') as root:
             root = Path(root)
             child = root / 'child.c'
-            child.write_text('int wmain(void) {return 0;}\n')
+            child.write_text('''#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+static DWORD WINAPI worker(void *argument) {
+  (void)argument; return 0;
+}
+int wmain(void) {
+  HANDLE thread = CreateThread(NULL, 65536, worker, NULL,
+                               STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+  if (!thread) return 2;
+  WaitForSingleObject(thread, INFINITE);
+  CloseHandle(thread);
+  return 0;
+}
+''')
             common = [compiler, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror']
             executable = root / 'fixture.exe'
             subprocess.run([*common, '-municode', str(child), '-o', str(executable)],

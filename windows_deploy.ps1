@@ -2,6 +2,7 @@ param(
     [string]$GameRoot = 'C:\Program Files (x86)\Steam\steamapps\common\DarkestDungeon',
     [switch]$ResourcesOnly,
     [switch]$NativeRender,
+    [switch]$NoNativeRender,
     [switch]$Diagnose
 )
 $ErrorActionPreference = 'Stop'
@@ -33,6 +34,20 @@ function Copy-GameLog {
     [System.IO.File]::WriteAllText((Join-Path $package 'windows_game_app.log'), $text,
         (New-Object System.Text.UTF8Encoding($false)))
 }
+function Invoke-PatchLauncher([string[]]$NativeArguments) {
+    $info = [System.Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $launcher
+    $info.Arguments = $NativeArguments -join ' '
+    $info.WorkingDirectory = $target
+    $info.UseShellExecute = $false
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    try {
+        if (-not $process.Start()) { throw 'Could not start the native patch launcher.' }
+        $process.WaitForExit()
+        return [int]$process.ExitCode
+    } finally { $process.Dispose() }
+}
 try {
     if (Get-Process -Name Darkest -ErrorAction SilentlyContinue) {
         throw 'Save and exit Darkest Dungeon normally, then run this command again.'
@@ -62,23 +77,22 @@ try {
     $localLog = Join-Path $target 'windows_launch.log'
     $arguments = @('--game', ('"{0}"' -f $game))
     if ($ResourcesOnly) { $arguments += '--resources-only' }
+    if ($NoNativeRender) { $arguments += '--no-native-render' }
     if ($NativeRender) { $arguments += '--native-render' }
-    $check = Start-Process -FilePath $launcher -ArgumentList ($arguments + '--check') -NoNewWindow -PassThru
-    $check.WaitForExit()
-    if ($check.ExitCode -ne 0) { throw ('Native EXE validation failed: ' + $check.ExitCode) }
+    $check = Invoke-PatchLauncher ($arguments + '--check')
+    if ($check -ne 0) { throw ('Native EXE validation failed: ' + $check) }
     $state['phase'] = 'checked'
     $state['game_sha256'] = $before
     $state['patch_directory'] = $target
     $state['runtime_rig'] = -not $ResourcesOnly
-    $state['native_render'] = [bool]$NativeRender
+    $state['native_render'] = ((-not $ResourcesOnly) -and (-not $NoNativeRender)) -or [bool]$NativeRender
     $state['diagnose'] = [bool]$Diagnose
     Write-State
     if ($Diagnose) { $arguments += '--diagnose' }
-    $launch = Start-Process -FilePath $launcher -ArgumentList $arguments -NoNewWindow -PassThru
-    $launch.WaitForExit()
+    $launch = Invoke-PatchLauncher $arguments
     Copy-PatchLog
     Copy-GameLog
-    if ($launch.ExitCode -ne 0) { throw ('Native patch launch failed: ' + $launch.ExitCode + '; see windows_launch.log') }
+    if ($launch -ne 0) { throw ('Native patch launch failed: ' + $launch + '; see windows_launch.log') }
     $after = (Get-FileHash -LiteralPath $game -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($after -ne $before) { throw 'The disk EXE changed during launch; inspect the game installation.' }
     $gameProcess = Get-Process -Name Darkest -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $game } | Select-Object -First 1
