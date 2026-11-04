@@ -84,12 +84,13 @@ def validate(game: Path):
             'runtime_verified': False}
 
 
-def build(game: Path, compiler: str | None = None):
-    result = validate(game)
+def compile_binaries(output: Path, compiler: str | None = None):
+    """Compile distributable binaries without requiring commercial game files."""
     compiler = compiler or shutil.which('x86_64-w64-mingw32-clang')
     if not compiler:
         raise RuntimeError('Set --windows-cc to an LLVM-MinGW x64 Clang compiler')
-    output = Path(tempfile.mkdtemp(prefix='dd-windows-build-'))
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
     common = [str(compiler), '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
               '-Wl,--no-insert-timestamp']
     launcher = output / 'dd_windows_launcher.exe'
@@ -98,12 +99,53 @@ def build(game: Path, compiler: str | None = None):
                     '-lbcrypt', '-o', str(launcher)], check=True)
     subprocess.run([*common, '-shared', str(HERE / 'skin_rig_patch.c'),
                     '-lm', '-o', str(library)], check=True)
+    setup = output / 'dd_patch_setup.exe'
+    with tempfile.TemporaryDirectory(prefix='dd-setup-payload-') as directory:
+        temporary = Path(directory)
+        header = []
+        for name, payload in (
+                ('setup_script', (HERE / 'windows_steam.ps1').read_bytes()),
+                ('setup_launcher', launcher.read_bytes()),
+                ('setup_library', library.read_bytes())):
+            rows = [','.join(f'0x{byte:02x}' for byte in payload[i:i+32])
+                    for i in range(0, len(payload), 32)]
+            header.append(f'static const unsigned char {name}[] = {{\n' +
+                          ',\n'.join(rows) + '\n};\n')
+        (temporary / 'windows_setup_payload.h').write_text(''.join(header))
+        manifest = temporary / 'setup.manifest'
+        manifest.write_text('''<?xml version="1.0" encoding="UTF-8"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+ <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges>
+  <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+ </requestedPrivileges></security></trustInfo>
+</assembly>
+''')
+        resource = temporary / 'setup.rc'
+        resource.write_text('1 24 "' + manifest.as_posix() + '"\n')
+        windres = Path(compiler).resolve().parent / 'x86_64-w64-mingw32-windres'
+        if not windres.is_file():
+            # Resolve the command path before following LLVM-MinGW's symlink.
+            selected = shutil.which(str(compiler))
+            windres = Path(selected or compiler).absolute().parent / 'x86_64-w64-mingw32-windres'
+        compiled_resource = temporary / 'setup_resource.o'
+        subprocess.run([str(windres), '-i', str(resource), '-o', str(compiled_resource)],
+                       check=True)
+        subprocess.run([*common, '-municode', '-mwindows', '-I', str(temporary),
+                        str(HERE / 'windows_setup.c'), str(compiled_resource),
+                        '-lshell32', '-luser32', '-o', str(setup)], check=True)
+    return {'launcher': str(launcher), 'library': str(library),
+            'setup': str(setup)}
+
+
+def build(game: Path, compiler: str | None = None):
+    result = validate(game)
+    output = Path(tempfile.mkdtemp(prefix='dd-windows-build-'))
+    result.update(compile_binaries(output, compiler))
     for name in ('windows_deploy.ps1', 'windows_start.cmd', 'windows_steam.ps1',
                  'windows_steam.cmd',
                  'windows_diagnose.cmd', 'windows_resources_only.cmd'):
         source = (HERE / name).read_text()
         (output / name).write_bytes(source.replace('\n', '\r\n').encode('ascii'))
-    result.update(launcher=str(launcher), library=str(library),
-                  start_script=str(output / 'windows_start.cmd'),
+    result.update(start_script=str(output / 'windows_start.cmd'),
                   steam_script=str(output / 'windows_steam.cmd'), check_only=True)
     return result

@@ -7,6 +7,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 function ConvertFrom-VdfToken([string]$Raw) {
     if (-not $Raw.StartsWith('"')) { return $Raw }

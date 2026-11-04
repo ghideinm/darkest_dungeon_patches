@@ -4,13 +4,75 @@
 
 | 功能 | 入口与范围 |
 | --- | --- |
-| 32 MiB 资源读取 | 默认启用；六个缓冲及读取容量同步更新 |
-| 原生分辨率画布 | `--native-render`；跟随实际画布，保留逻辑布局与输入坐标 |
+| 32 MiB 资源读取 | 默认启用；Linux 六个、Windows 十二个缓冲及读取容量同步更新 |
+| 原生分辨率画布 | Steam 部署默认启用；跟随实际画布，保留逻辑布局与输入坐标 |
 | 按皮肤切换骨架 | `--runtime-rig`；按当前皮肤的实际文件来源发现骨架，覆盖角色本体与详情预览 |
 
-启动器校验游戏 SHA-256、全部改写点与运行时接口指令。补丁只修改本次进程内存，磁盘游戏程序保持原样。可一次性接入 Steam，以后直接点击“开始游戏”加载三项补丁。运行时来源模式已通过离线验证，游戏画面、换肤和战斗全流程待实机验证。
+启动器校验游戏 SHA-256、全部改写点与运行时接口指令。补丁只修改本次进程内存，磁盘游戏程序保持原样。部署目标是一次配置，以后直接在 Steam 点击“开始游戏”加载三项补丁。Windows 动态骨架、读取扩容和 4K 画布已由用户确认，新的安装 EXE 与 Steam 自动接入仍待实机验收；完整战斗流程未完成回归。
 
-## 使用
+## 下载发布包并接入 Steam
+
+GitHub Actions 在 push、pull request 或手动运行时构建 Linux x86-64 和 Windows x64 的同一份发布包，不需要上传游戏文件。到仓库 Actions 中下载 `darkest_dungeon_patches` 构建产物；推送 `v*` 标签时，工作流会将 ZIP 上传到对应 GitHub Release。工作流需先提交到你的 GitHub 仓库才会执行，本地保存文件不会触发远端 CI。
+
+ZIP 内所有平台文件放在同一个目录：
+
+```text
+darkest_dungeon_patches/
+  README.md
+  SHA256SUMS
+  steam_launcher
+  launcher.conf
+  libdd_resource_loading_patch.so
+  libdd_skin_rig_patch.so
+  dd_windows_launcher.exe
+  dd_skin_rig_patch.dll
+  dd_patch_setup.exe
+```
+
+### Linux：填写一次 Steam 启动参数
+
+1. 解压并将整个目录放到固定位置，例如 `/home/你的用户名/.local/share/darkest_dungeon_patches`。补丁目录不能含空白或冒号，之后不要移动、删除；玩家无需安装 Python 或编译器。
+2. 给启动器执行权限：`chmod +x /home/你的用户名/.local/share/darkest_dungeon_patches/steam_launcher`。
+3. 用文本编辑器打开同目录的 `launcher.conf`。仅将第 2 行改为游戏 Linux x86-64 程序的实际绝对路径，第 3 行改为一个可写日志文件的绝对路径；其余身份哈希和指令校验行保持原样。例如这两行分别为 `/home/你的用户名/.local/share/Steam/steamapps/common/DarkestDungeon/_linux/darkest.bin.x86_64` 和 `/home/你的用户名/.local/share/darkest_dungeon_patches/steam_launch.log`。
+4. Steam →《暗黑地牢》→ 属性 → 通用 → 启动选项，填写下面一行，将用户名和目录替换为实际值：
+
+```text
+/home/你的用户名/.local/share/darkest_dungeon_patches/steam_launcher -- %command%
+```
+
+如果已有额外游戏参数，保留在 `%command%` 后；不要重复套用本项目的旧启动包装器。Steam 必须使用原生 Linux 版本，不能强制 Proton。系统需提供 coreutils 的 `sha256sum`。以后照常点击“开始游戏”，启动器核对游戏身份与全部原指令，然后加载同目录两个 SO。这里使用启动器保留完整校验，不需要手动写 `LD_PRELOAD`。
+
+撤销时从 Steam 启动选项中移除这层包装器，恢复你原来的参数。Steam 以外直接运行原游戏程序不自动加载本补丁。
+
+### Windows：运行一次安装 EXE
+
+1. 正常保存退出游戏，并从 Steam 菜单选择退出客户端。
+2. 双击 `dd_patch_setup.exe`。它内置原生启动器、DLL 和一次安装逻辑，自动查找 Steam、最近登录账号和游戏库；玩家无需 Python、编译器或另装 PowerShell，安装阶段使用 Windows 自带的 PowerShell。
+3. 安装成功后重新打开 Steam，直接在原游戏条目点击“开始游戏”。日常启动只运行已安装的原生 EXE 和 DLL，不再执行安装器或 PowerShell，也不用运行 CMD。
+
+补丁固定安装到 `%LOCALAPPDATA%\DarkestDungeonPatches\steam`，为当前 Steam 账号 AppID `262060` 写入启动包装器，并保存原参数供撤销。即使 Steam 默认选择 32 位入口，启动器也会使用同一游戏根目录下经校验的 x64 版本。安装包可以删除；退订用于分发补丁的 Mod 不会删除这个独立安装目录或清除 Steam 启动选项。皮肤 Mod 自身仍需保留：退订皮肤 Mod 后其贴图和骨骼资源可能被 Steam 删除，补丁自动加载不会替你保留这些资源。
+
+需要卸载自动加载时，正常退出游戏和 Steam，再运行：
+
+```text
+dd_patch_setup.exe --uninstall
+```
+
+安装器会恢复原 Steam 启动选项；补丁文件保留在独立目录。可用 `--preview` 查看拟写配置、`--status` 查询状态；`--steam-root`、`--steam-user`、`--game-root`、`--install-root` 可覆盖自动定位。安装诊断在 `%LOCALAPPDATA%\DarkestDungeonPatches\setup.log`，日常补丁日志在安装目录的 `windows_launch.log`。安装器以当前用户权限运行，不修改 Defender 规则；本机实测中 Defender 曾拦截注入器和 DLL，构建成功不代表杀毒软件已认可该文件，遇到拦截需由用户决定是否放行。
+
+EXE 分发流程目前仅完成实现、编译和静态检查，实际“一次安装 → Steam 启动 → 删除安装包或退订分发 Mod → 再次启动”仍待实机验证。补丁只适配本文列出的游戏版本；Steam 更新游戏后若身份或指令不符，启动器拒绝加载。
+
+## GitHub CI/CD 与本地打包
+
+工作流为 `.github/workflows/build_release.yml`：Linux 使用 Clang，Windows 使用固定版本且校验 SHA-256 的 LLVM-MinGW Clang；两者保留 `-Wall -Wextra -Werror`。ZIP 包含文件校验和，不含游戏、存档或 Mod 商业资源。CI 使用临时配置和自有程序做离线检查，并在 Windows runner 上用系统 PowerShell 验证安装 EXE 的内置载荷、状态查询和拒绝不支持的游戏；发布任务等待两组检查完成。CI 通过不等于游戏画面验证。
+
+本地开发者可运行同一打包入口，输出目录必须为空，默认使用系统临时目录：
+
+```sh
+python manage.py bundle --windows-cc /path/to/x86_64-w64-mingw32-clang
+```
+
+## 源码开发与手动启动
 
 游戏和所需原始 Mod 已正常安装、启用后，在本目录执行：
 
@@ -40,7 +102,7 @@ python manage.py windows_check --game-root /path/to/windows/DarkestDungeon
 python manage.py windows_build --game-root /path/to/windows/DarkestDungeon --windows-cc /path/to/x86_64-w64-mingw32-clang
 ```
 
-构建输出 EXE／DLL 与启动脚本到系统临时目录。Windows 中将这些文件保持在同一目录，保持 Steam 已运行、游戏已正常退出，再双击 `windows_start.cmd`。脚本核对原 EXE，将补丁复制到当前用户的 `%LOCALAPPDATA%\DarkestDungeonPatches\windows_x64\<version>`，运行原生检查并启动；玩家无需 Python 或编译器。正常启动默认启用读取、骨架和七处画布补丁。可向 CMD 传 `-GameRoot <目录>` 指定游戏，`-ResourcesOnly` 隔离测试读取补丁，`-NoNativeRender` 暂停画布补丁；原生 EXE 对应支持 `--resources-only`、`--no-native-render`。
+开发诊断构建输出 EXE／DLL、安装 EXE 和启动脚本到系统临时目录。保持 Steam 已运行、游戏已正常退出后，`windows_start.cmd` 可单次启动测试：核对原 EXE，将补丁复制到 `%LOCALAPPDATA%\DarkestDungeonPatches\windows_x64\<version>`，运行原生检查并启动。该 CMD 是诊断入口，日常分发使用上方的一次安装 EXE。正常启动默认启用读取、骨架和七处画布补丁。可向 CMD 传 `-GameRoot <目录>` 指定游戏，`-ResourcesOnly` 隔离测试读取补丁，`-NoNativeRender` 暂停画布补丁；原生 EXE 对应支持 `--resources-only`、`--no-native-render`。
 
 接入 Windows Steam 时，先正常保存退出游戏和 Steam，再双击同目录的 `windows_steam.cmd`，随后打开 Steam，直接点击原游戏的“开始游戏”。安装器自动查找 Steam、最近登录账号和游戏库，也可传 `-SteamRoot`、`-SteamUser`、`-GameRoot` 指定。默认固定安装到 `%LOCALAPPDATA%\DarkestDungeonPatches\steam`，可用 `-InstallRoot` 更改。日常启动只运行该目录中的原生 EXE 和 DLL，不依赖 Python、源码、共享目录或安装脚本。
 

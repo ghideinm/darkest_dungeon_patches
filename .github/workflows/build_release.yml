@@ -1,0 +1,90 @@
+name: build_release
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Prepare pinned Windows Clang toolchain
+        env:
+          TOOLCHAIN_ROOT: ${{ runner.temp }}/dd_toolchain
+        run: |
+          mkdir -p "$TOOLCHAIN_ROOT"
+          curl --fail --location --retry 3 \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64.tar.xz \
+            --output "$TOOLCHAIN_ROOT/toolchain.tar.xz"
+          echo "55064b60b991a1e1e8090b8c2f84e82b22cfe5903d12c159d65064cf5e8ae335  $TOOLCHAIN_ROOT/toolchain.tar.xz" | sha256sum --check -
+          tar -xJf "$TOOLCHAIN_ROOT/toolchain.tar.xz" -C "$TOOLCHAIN_ROOT"
+          echo "DD_WINDOWS_CC=$TOOLCHAIN_ROOT/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64/bin/x86_64-w64-mingw32-clang" >> "$GITHUB_ENV"
+      - name: Offline regressions without commercial game files
+        run: |
+          DD_WINDOWS_POWERSHELL="$(command -v pwsh)"
+          export DD_WINDOWS_POWERSHELL
+          python3 -m unittest -q test_runtime_rig test_skin_package test_steam_integration test_windows_port
+      - name: Build combined release
+        run: |
+          python3 manage.py bundle \
+            --windows-cc "$DD_WINDOWS_CC" \
+            --output "$RUNNER_TEMP/release/darkest_dungeon_patches"
+          cd "$RUNNER_TEMP/release/darkest_dungeon_patches"
+          sha256sum --check SHA256SUMS
+      - name: Upload combined archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: darkest_dungeon_patches
+          path: ${{ runner.temp }}/release/darkest_dungeon_patches.zip
+          if-no-files-found: error
+          retention-days: 14
+  windows_setup:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: darkest_dungeon_patches
+          path: ${{ runner.temp }}/release
+      - name: Check self-contained EXE using Windows PowerShell
+        shell: powershell
+        run: |
+          Expand-Archive -LiteralPath "$env:RUNNER_TEMP\release\darkest_dungeon_patches.zip" -DestinationPath "$env:RUNNER_TEMP\bundle"
+          .\test_windows_setup.ps1 -BundleRoot "$env:RUNNER_TEMP\bundle\darkest_dungeon_patches"
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build, windows_setup]
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: darkest_dungeon_patches
+          path: release
+      - name: Publish versioned archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release/darkest_dungeon_patches.zip --clobber
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes release/darkest_dungeon_patches.zip
+          fi
