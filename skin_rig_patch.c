@@ -322,6 +322,7 @@ static int read_routes(FILE *file) {
 static uintptr_t base;
 static void (*original_colour)(void *, int);
 static void (*original_preview)(void *, void *);
+static void (*original_override)(void *, const char *);
 static void *(*native_new)(const Handles *, int);
 static const char *(*resource_name)(void *, const Handle *);
 static void (*set_animation)(void *, const char *, int, int);
@@ -540,6 +541,31 @@ static int sprite_matches(void *sprite, const Route *route) {
   }
   return same_group(resource_route(first, route), route);
 }
+/* Native colour paths can contain repeated separators. The OS accepts them,
+ * but the Mod storage index uses exact logical names. Preserve the final slash:
+ * OverrideAtlasTextures concatenates its directory and page name with %s%s. */
+static void override_textures(void *sprite, const char *directory) {
+  if (!runtime_enabled || !directory || strncmp(directory, "heroes/", 7)) {
+    original_override(sprite, directory);
+    return;
+  }
+  char normalized[512];
+  size_t count = 0;
+  for (const char *p = directory; *p; ++p) {
+    if (*p == '/' && count && normalized[count - 1] == '/')
+      continue;
+    if (count == sizeof(normalized) - 1) {
+      dprintf(2, "DD_RIG_TEXTURE_PATH_REFUSED reason=too_long\n");
+      return;
+    }
+    normalized[count++] = *p;
+  }
+  normalized[count] = 0;
+  if (strcmp(directory, normalized))
+    dprintf(2, "DD_RIG_TEXTURE_PATH_NORMALIZED from=%s to=%s\n", directory,
+            normalized);
+  original_override(sprite, normalized);
+}
 #ifdef DD_RIG_RUNTIME_TEST
 /* Offline adapter: exercise discovery and native ownership calls with fake
  * APIs. */
@@ -574,6 +600,12 @@ void *dd_runtime_test_sprite(const char *skin) {
 int dd_runtime_test_matches(void *sprite, const char *skin) {
   const Route *route = runtime_route(skin);
   return route && sprite_matches(sprite, route);
+}
+void dd_runtime_test_override(void *sprite, const char *directory,
+                              void (*native)(void *, const char *)) {
+  runtime_enabled = 1;
+  original_override = native;
+  override_textures(sprite, directory);
 }
 #endif
 static void discard_sprite(void *sprite) {
@@ -796,13 +828,16 @@ __attribute__((constructor)) static void init(void) {
     if (!valid)
       _exit(125);
   }
-  uintptr_t sites[3] = {base + 0xefc214, base + 0xd66e80, base + 0x11a8400};
-  const unsigned char expected[3][10] = {
+  uintptr_t sites[4] = {base + 0xefc214, base + 0xd66e80, base + 0x11a8400,
+                        base + 0xa70e10};
+  const unsigned char expected[4][10] = {
       {0xe8, 0xf7, 0x2e, 0xb7, 0xff},
       {0x41, 0x57, 0x41, 0x56, 0x53},
-      {0x41, 0x56, 0x53, 0x48, 0x81, 0xec, 0x08, 0x02, 0, 0}};
-  size_t lengths[3] = {5, 5, 10};
-  for (size_t i = 0; i < 3; ++i)
+      {0x41, 0x56, 0x53, 0x48, 0x81, 0xec, 0x08, 0x02, 0, 0},
+      {0x55, 0x41, 0x57, 0x41, 0x56}};
+  size_t lengths[4] = {5, 5, 10, 5};
+  size_t site_count = runtime_enabled ? 4 : 3;
+  for (size_t i = 0; i < site_count; ++i)
     if (memcmp((void *)sites[i], expected[i], lengths[i])) {
       dprintf(2, "DD_RIG_PATCH_REFUSED site=%zx\n", sites[i]);
       _exit(125);
@@ -839,6 +874,12 @@ __attribute__((constructor)) static void init(void) {
   memcpy(stubs + 128, expected[2], 10);
   jump_absolute(stubs + 138, (void *)(sites[2] + 10));
   jump_absolute(stubs + 160, change_preview);
+  if (runtime_enabled) {
+    memcpy(stubs + 192, expected[3], 5);
+    jump_absolute(stubs + 197, (void *)(sites[3] + 5));
+    jump_absolute(stubs + 224, override_textures);
+    original_override = (void *)(stubs + 192);
+  }
   original_colour = (void *)(stubs + 64);
   original_preview = (void *)(stubs + 128);
   native_new = (void *)(base + 0xa6f110);
@@ -853,8 +894,8 @@ __attribute__((constructor)) static void init(void) {
   if (mprotect(stubs, 4096, PROT_READ | PROT_EXEC))
     _exit(125);
   long page_size = sysconf(_SC_PAGESIZE);
-  uintptr_t pages[3];
-  for (size_t i = 0; i < 3; ++i) {
+  uintptr_t pages[4];
+  for (size_t i = 0; i < site_count; ++i) {
     pages[i] = sites[i] & ~((uintptr_t)page_size - 1);
     if (mprotect((void *)pages[i], (size_t)page_size, PROT_READ | PROT_WRITE))
       _exit(125);
@@ -865,7 +906,9 @@ __attribute__((constructor)) static void init(void) {
   *(unsigned char *)sites[0] = 0xe8;
   install_jump(sites[1], stubs + 96);
   install_jump(sites[2], stubs + 160);
-  for (size_t i = 0; i < 3; ++i) {
+  if (runtime_enabled)
+    install_jump(sites[3], stubs + 224);
+  for (size_t i = 0; i < site_count; ++i) {
     __builtin___clear_cache((char *)pages[i], (char *)(pages[i] + page_size));
     if (mprotect((void *)pages[i], (size_t)page_size, PROT_READ | PROT_EXEC))
       _exit(125);

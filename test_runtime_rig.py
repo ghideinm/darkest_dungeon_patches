@@ -226,6 +226,146 @@ class NativeSourceResolverTest(unittest.TestCase):
         self.assertEqual(size, 0)
 
 
+class NativeTextureOverrideTest(unittest.TestCase):
+    """Execute the real texture-override loop with isolated handles/loaders."""
+
+    @classmethod
+    def setUpClass(cls):
+        game = DEFAULT_GAME_ROOT / '_linux/darkest.bin.x86_64'
+        if platform.machine() != 'x86_64' or not game.is_file():
+            raise unittest.SkipTest('Verified Linux x86-64 game binary unavailable')
+        launch.validate(game, runtime_rig=True)
+        cls.temporary = tempfile.TemporaryDirectory(prefix='dd-texture-override-test-')
+        library = Path(cls.temporary.name) / 'runtime_fixture.so'
+        subprocess.run(['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                        '-DDD_RIG_RUNTIME_TEST', '-fPIC', '-shared',
+                        str(Path(__file__).with_name('skin_rig_patch.c')), '-ldl', '-lm',
+                        '-o', str(library)], check=True)
+        cls.library = ctypes.CDLL(str(library))
+        cls.library.dd_runtime_test_override.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                                        ctypes.c_void_p]
+        cls.library.dd_runtime_test_override.restype = None
+        data = game.read_bytes()
+        offset = struct.unpack_from('<Q', data, 32)[0]
+        size, count = struct.unpack_from('<HH', data, 54)
+        start, end = 0xa70e10, 0xa71034
+        code = None
+        for i in range(count):
+            kind, flags, pos, address, _, length, _, _ = struct.unpack_from(
+                '<IIQQQQQQ', data, offset + size * i)
+            if kind == 1 and flags & 1 and address <= start < end <= address + length:
+                code = bytearray(data[pos + start - address:pos + end - address])
+        if code is None:
+            raise AssertionError('Native texture override code unavailable')
+        cls.callbacks, cls.requests = [], []
+        cls.available = set()
+        ptr = ctypes.c_void_p
+
+        def callback(result, args, function):
+            wrapped = ctypes.CFUNCTYPE(result, *args)(function)
+            cls.callbacks.append(wrapped)
+            return ctypes.cast(wrapped, ptr).value
+
+        def clear(handle):
+            ctypes.memmove(handle, struct.pack('<iiQ', -1, -1, 0), 16)
+
+        def load_texture(handle, path, flags):
+            name = ctypes.string_at(path).decode()
+            cls.requests.append((name, name in cls.available))
+            clear(handle)
+
+        def format_path(target, unused_format, directory, page):
+            # The original binary's format at 0x1872e20 is "%s%s".
+            name = ctypes.string_at(directory) + ctypes.string_at(page)
+            if len(name) >= 512:
+                raise AssertionError('Fixture path too long')
+            ctypes.memmove(target, name + b'\0', len(name) + 1)
+            return target
+
+        cls.libc = ctypes.CDLL(None, use_errno=True)
+        unused = callback(ptr, [], lambda: None)
+        targets = {
+            0xa8e6f0: callback(None, [ptr], clear),
+            0xa8e640: callback(None, [ptr, ptr, ctypes.c_uint], load_texture),
+            0xc33010: callback(ptr, [ptr, ptr, ptr, ptr], format_path),
+            0x401c40: ctypes.cast(cls.libc.strrchr, ptr).value,
+            0xc3aeb0: callback(ctypes.c_bool, [ptr, ptr], lambda a, b: False),
+            0xc3f3f0: unused, 0xc3f170: unused, 0xc3b880: unused,
+            0x4016d0: unused, 0x402320: unused,
+        }
+        cls.mapping = mmap.mmap(-1, 4096, prot=mmap.PROT_READ | mmap.PROT_WRITE)
+        base = ctypes.addressof(ctypes.c_char.from_buffer(cls.mapping))
+        trampoline = {}
+        for i, (target, replacement) in enumerate(targets.items()):
+            location = 768 + i * 16
+            trampoline[target] = base + location
+            cls.mapping[location:location + 12] = b'\x48\xb8' + struct.pack('<Q', replacement) + b'\xff\xe0'
+        for site in [0xa70e67, 0xa70e8d, 0xa70eec, 0xa70efe, 0xa70f1b,
+                     0xa70f28, 0xa70f33, 0xa70f85, 0xa70faa, 0xa70fc1,
+                     0xa70fd4, 0xa71001, 0xa71014]:
+            index = site - start
+            if code[index] != 0xe8:
+                raise AssertionError('Unexpected native call instruction')
+            target = site + 5 + struct.unpack_from('<i', code, index + 1)[0]
+            struct.pack_into('<i', code, index + 1, trampoline[target] - (base + index + 5))
+        cls.mapping[:len(code)] = code
+        cls.libc.mprotect.argtypes = [ptr, ctypes.c_size_t, ctypes.c_int]
+        if cls.libc.mprotect(base, 4096, mmap.PROT_READ | mmap.PROT_EXEC):
+            raise OSError(ctypes.get_errno(), 'mprotect failed')
+        cls.native = ctypes.CFUNCTYPE(None, ptr, ctypes.c_char_p)(base)
+        cls.native_address = base
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.mapping.close()
+        cls.temporary.cleanup()
+
+    def setUp(self):
+        self.requests.clear()
+        self.available.clear()
+        self.references = []
+        names = ['highwayman.sprite.attack_bbpistol.png',
+                 'highwayman.sprite.attack_whiteslice.png']
+        states = ctypes.create_string_buffer(0x30 * len(names))
+        for i, name in enumerate(names):
+            filename = ctypes.create_string_buffer(('/source/anim/' + name).encode())
+            page, atlas, spine = (ctypes.create_string_buffer(n) for n in (0x40, 8, 16))
+            struct.pack_into('<Q', page, 0x28, ctypes.addressof(filename))
+            struct.pack_into('<Q', atlas, 0, ctypes.addressof(page))
+            struct.pack_into('<Q', spine, 8, ctypes.addressof(atlas))
+            struct.pack_into('<iiQ', states, i * 0x30, -1, -1, ctypes.addressof(spine))
+            struct.pack_into('<iiQ', states, i * 0x30 + 0x20, -1, -1, 0)
+            self.references.extend([filename, page, atlas, spine])
+        self.sprite = ctypes.create_string_buffer(0x30)
+        struct.pack_into('<QQ', self.sprite, 0x20, ctypes.addressof(states),
+                         ctypes.addressof(states) + 0x30 * len(names))
+        self.references.append(states)
+        for colour in 'ABCD':
+            self.available.update(f'heroes/highwayman/highwayman_{colour}/anim/{name}'
+                                  for name in names)
+
+    def test_reproduces_original_double_separator_texture_misses(self):
+        self.native(ctypes.addressof(self.sprite), b'heroes/highwayman/highwayman_A//anim/')
+        self.assertEqual(len(self.requests), 2)
+        self.assertTrue(all('//anim/' in path and not found for path, found in self.requests))
+
+    def test_hook_preserves_native_page_names_and_finds_all_four_palettes(self):
+        for colour in 'ABCD':
+            self.requests.clear()
+            self.library.dd_runtime_test_override(
+                ctypes.addressof(self.sprite),
+                f'heroes/highwayman//highwayman_{colour}//anim/'.encode(), self.native_address)
+            self.assertEqual(len(self.requests), 2)
+            self.assertTrue(all(found and '//' not in path for path, found in self.requests))
+
+    def test_null_reset_and_non_hero_directories_keep_native_behavior(self):
+        self.library.dd_runtime_test_override(ctypes.addressof(self.sprite), None, self.native_address)
+        self.assertFalse(self.requests)
+        self.library.dd_runtime_test_override(ctypes.addressof(self.sprite),
+                                              b'monsters/other//anim/', self.native_address)
+        self.assertTrue(all(path.startswith('monsters/other//anim/') for path, _ in self.requests))
+
+
 class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
     """Exercise the production discovery/loading path with controlled native APIs."""
 

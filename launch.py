@@ -31,7 +31,8 @@ RUNTIME_SITES = [(0xa5a7d0, bytes.fromhex('55 53 48 81 ec 48 04 00 00')),
                  (0xc3a260, bytes.fromhex('41 57 41 56 41 54 53')),
                  (0xa63a60, bytes.fromhex('83 3f 00 78 38')),
                  (0xc3f3f0, bytes.fromhex('41 56 53 50 48 63 06')),
-                 (0xa70a60, bytes.fromhex('55 41 57 41 56 41 55 41 54 53 50'))]
+                 (0xa70a60, bytes.fromhex('55 41 57 41 56 41 55 41 54 53 50')),
+                 (0xa70e10, bytes.fromhex('55 41 57 41 56'))]
 
 
 def validate(game, native_render=False, rig_routing=False, runtime_rig=False):

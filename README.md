@@ -41,7 +41,7 @@ python manage.py steam_install
 
 随后重新打开 Steam，照常点击《暗黑地牢》的“开始游戏”。安装器只为最近登录的 Steam 账号、AppID `262060` 接入启动包装器；已有启动选项会保留。可用 `--steam-root`、`--steam-user` 指定客户端和 userdata 数字账号 ID。安装、更新和撤销时要求 Steam 已退出，避免客户端覆盖配置。
 
-默认固定安装到 `${XDG_DATA_HOME:-~/.local/share}/darkest_dungeon_patches`，可用 `--install-root` 指定；该路径不能包含空白或冒号。安装器预编译两个 SO 和 C11 原生启动器，用版本目录与 `current` 链接切换；日常启动不依赖 Python、Clang、源码目录或 `/tmp` 缓存，需系统提供 coreutils 的 `sha256sum`。每次启动仍校验整个游戏 SHA-256 和全部 24 处原指令，校验失败以 125 拒绝启动。
+默认固定安装到 `${XDG_DATA_HOME:-~/.local/share}/darkest_dungeon_patches`，可用 `--install-root` 指定；该路径不能包含空白或冒号。安装器预编译两个 SO 和 C11 原生启动器，用版本目录与 `current` 链接切换；日常启动不依赖 Python、Clang、源码目录或 `/tmp` 缓存，需系统提供 coreutils 的 `sha256sum`。每次启动仍校验整个游戏 SHA-256 和全部 25 处原指令，校验失败以 125 拒绝启动。
 
 包装器保留 Steam 的原启动命令、运行时包装和参数，将游戏入口选择为已校验的 Linux x86-64 程序，再设置 `LD_PRELOAD` 与三项补丁开关。其他预加载库继续保留，旧 `DD_RIG_MAP` 清除；重复预加载本项目补丁会被拒绝。Steam 游戏入口仍需为原生 Linux 版本。直接绕过 Steam 执行原游戏文件不自动加载补丁。
 
@@ -61,6 +61,7 @@ python manage.py steam_uninstall
 3. 对每张贴图，在该来源中优先找 `heroes/<hero>/<skin>/anim/*.skel`，再找同一来源的 `heroes/<hero>/anim/*.skel`，最后查本体；读取候选骨架的同名图集，只选择实际引用该贴图的骨架。不同动作可以分别来自本体、官方 DLC 或 Mod，再组合为一个精灵实例。
 4. 用原生存储层的 `>` 前缀明确指定来源，再通过原生骨架工厂、资源管理器和精灵构造函数加载，避免被其他 Mod 再次覆盖；临时资源句柄由原生释放接口回收。
 5. 换肤前核对动画状态和回调；重建实例后保留动画名、时间和原生脚步事件回调。非英雄角色保留原逻辑。
+6. 在原生 `SpineSprite::OverrideAtlasTextures` 入口合并英雄逻辑目录中的重复斜杠，保留末尾分隔符，再交给原生贴图加载逻辑。这样 `heroes/<hero>/<skin>//anim/` 不会绕过按精确路径索引的 Mod 文件，退到本体贴图或生成占位纹理；空目录指针的重置行为不变。
 
 这里的索引是进程内的发现缓存，不依赖打包产生的文件。每次选择皮肤都会重新查询当前存储覆盖结果；不支持在运行中修改骨架内容的热重载。
 
@@ -80,8 +81,9 @@ python manage.py steam_uninstall
 | `SpineDataFactory::CreateSpineData` | `0xc3a260` | 通过来源路径创建原生骨架句柄 |
 | `ResourceManager::GetResource` | `0xc3f3f0` | 等待并取得加载结果 |
 | `delete_SpineData` | `0xa63a60` | 释放临时骨架句柄 |
+| `SpineSprite::OverrideAtlasTextures` | `0xa70e10` | 规范英雄贴图目录后执行原生换肤 |
 
-`test_runtime_rig.py` 覆盖来源搜索、冲突拒绝、资源键、句柄回收和无需配置的启动入口；另从已校验的游戏文件中提取 `IO_GetFileInfo` 指令，在模拟存储设备上隔离执行，验证原生覆盖顺序和 `>` 分支。该测试不执行游戏入口、初始化、图形或存档代码，不能替代实际游戏验证。不提交商业资源或提取的完整函数指令。
+`test_runtime_rig.py` 覆盖来源搜索、冲突拒绝、资源键、句柄回收和无需配置的启动入口；另从已校验的游戏文件中提取 `IO_GetFileInfo` 与 `OverrideAtlasTextures` 指令，在模拟存储设备和资源句柄上隔离执行，验证原生覆盖顺序、`>` 分支与重复分隔符导致的贴图缺失。该测试不执行游戏入口、初始化、图形或存档代码，不能替代实际游戏验证。不提交商业资源或提取的完整函数指令。
 
 ## 安装与可选旧式打包
 
