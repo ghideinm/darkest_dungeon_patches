@@ -1,6 +1,6 @@
 # Darkest Dungeon Patches
 
-[![B站主页](https://img.shields.io/badge/Bilibili-00A1D6?style=for-the-badge&logo=bilibili&logoColor=white)](https://space.bilibili.com/398692528)
+<a href="https://space.bilibili.com/398692528"><img src="https://www.bilibili.com/favicon.ico" alt="B站主页" width="32" height="32"></a>
 
 《暗黑地牢》Steam 版引擎补丁：**32 MiB 资源读取缓冲、原生分辨率画布、按皮肤实际 Mod 来源加载骨架**。配置后直接从 Steam 启动，无需 Python 或编译器。
 
