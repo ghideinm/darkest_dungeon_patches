@@ -23,7 +23,7 @@
 
 补丁只修改运行中的进程内存，不修改磁盘上的游戏程序。Linux 需使用原生入口；Proton 不适用这套 Linux 配置。Windows 的 Steam 默认入口可以是 32 位，启动器会优先转到同一安装目录下的 x64 程序。
 
-发布包不包含游戏、存档或皮肤资源。请先通过 Steam 正常安装游戏，并安装、启用所需的 Mod。
+本仓库只维护引擎补丁及其构建、检查和部署工具，不提供皮肤制作、皮肤 Mod 打包或皮肤资源安装还原功能。发布包不包含游戏、存档或皮肤资源。请先通过 Steam 正常安装游戏，并安装、启用所需的 Mod。
 
 ## 下载
 
@@ -144,13 +144,12 @@ darkest_dungeon_patches/
 
 ```text
 src/
-  darkest_dungeon_patches/  # Python 构建、配置与部署工具
+  darkest_dungeon_patches/  # Python 构建、检查与发布工具
   native/
     common/                # 特征扫描、地址解析和共用骨架路由
     linux/                 # Linux 原生补丁与加载逻辑
     windows/               # Windows 适配、注入器与安装器
-scripts/                   # 开发入口和安装器内置脚本
-config/                    # 配置文件
+scripts/windows/           # Windows 补丁安装器内置脚本
 tests/                     # 自包含单元测试与集成测试
 .github/workflows/         # GitHub Actions
 ```

@@ -13,8 +13,8 @@ from .address_scan import read_image, resolve, signatures
 from .paths import COMMON_NATIVE, LINUX_NATIVE
 
 
-def validate(game, native_render=False, rig_routing=False, runtime_rig=False):
-    groups = 1 | (2 if native_render else 0) | (4 if rig_routing or runtime_rig else 0)
+def validate(game, native_render=False, runtime_rig=False):
+    groups = 1 | (2 if native_render else 0) | (4 if runtime_rig else 0)
     resolved, issues = resolve(read_image(game, "linux"), signatures("linux"), groups)
     return {
         "compatible": not issues,

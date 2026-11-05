@@ -1,8 +1,10 @@
 # 开发约定
 
+- 本仓库只维护引擎补丁及其构建、检查和部署工具；不包含皮肤制作、皮肤 Mod 打包、皮肤资源安装还原或角色工程专用配置。
+
 - 默认中文。维护 Linux x86-64 的资源读取、原生画布和皮肤骨架路由补丁，以及用户授权的 Windows x64 对应迁移；各平台独立校验补丁原指令，不按游戏版本号或整份 EXE 哈希限制加载。
 - 目录及源码、脚本、配置使用 snake_case；开发统一入口是 `manage.py`。Linux 日常通过 Steam 的环境变量直接预加载 SO，不使用启动包装器。
-- 源码放 `src/`，脚本放 `scripts/`，配置放 `config/`，测试放 `tests/`；根目录只保留统一入口和项目元数据。
+- 源码放 `src/`，脚本放 `scripts/`，测试放 `tests/`；根目录只保留统一入口和项目元数据。
 - Python 使用 uv 管理环境与锁文件，使用 Ruff 做格式与风格检查；开发命令使用 `uv run --locked`。
 - C11 使用 Clang，保留 `-Wall -Wextra -Werror`。不随路径整理更改原生地址、指令或补丁开关。
 - 使用 `pnpm format` 应用 LLVM 默认格式，提交前通过 `pnpm check`（clang-format／clang-tidy）。Husky 管理 Hook，commitlint 继承 Conventional Commits；ESM 配置使用 `export default`，不新增自定义消息规则。
