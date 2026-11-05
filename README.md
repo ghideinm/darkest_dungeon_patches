@@ -27,7 +27,7 @@
 
 ## 下载
 
-从仓库 **Releases** 下载 `darkest_dungeon_patches.zip`。开发构建可在 **Actions → build_release → 成功完成的运行 → Artifacts** 中下载 `darkest_dungeon_patches`。
+从仓库 [Releases](https://github.com/ghideinm/darkest_dungeon_patches/releases) 下载 `darkest_dungeon_patches.zip`。普通分支提交只运行检查；推送 `v*` 标签后才构建并发布统一补丁包。
 
 解压后的同一个目录包含两平台文件，按对应平台的说明使用即可：
 
@@ -185,6 +185,6 @@ Python 环境与开发依赖由 `pyproject.toml`、`uv.lock` 管理；`pnpm chec
 
 `tests/` 只包含针对项目代码的单元测试和集成测试，数据、Steam 配置和可执行程序均为临时生成的测试替身，不读取已安装的游戏、存档或商业资源，也不需要手动观察画面。回归覆盖代码／数据地址独立移动、相对调用与数据引用、特征缺失／歧义，以及注入失败后的正常启动。Windows 原生启动链的自有程序测试可按需提供 LLVM-MinGW 与 Wine；安装器集成检查在 Windows runner 上自动执行。
 
-[GitHub Actions 工作流](.github/workflows/build_release.yml) 在 push、pull request 或手动运行时构建，执行离线检查和 Windows 安装器检查；`v*` 标签在检查通过后发布统一 ZIP。CI 通过不等于实际游戏场景验证。
+[GitHub Actions 工作流](.github/workflows/build_release.yml) 在普通分支 push、pull request 或手动运行时执行风格和离线检查，不生成发布产物。推送 `v*` 标签后，检查通过才会构建 Linux／Windows 统一 ZIP，执行 Windows 安装器自包含检查，并上传到对应 GitHub Release。CI 通过不等于实际游戏场景验证。
 
 C11 使用 Clang，保留 `-Wall -Wextra -Werror`；格式和静态分析检查失败会阻止提交。提交消息遵循 Conventional Commits。修改平台适配时，必须核对目标原指令与调用约定，不增加游戏版本或整文件哈希白名单，不修改游戏磁盘程序或跳过游戏断言。
