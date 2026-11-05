@@ -24,6 +24,7 @@
 static int windows_log(int descriptor, const char *format, ...);
 #define dprintf windows_log
 #else
+#include "../linux/linux_runtime.h"
 #include <dlfcn.h>
 #include <link.h>
 #include <sys/mman.h>
@@ -34,7 +35,7 @@ static int windows_log(int descriptor, const char *format, ...);
 #define DD_FUNCTION_WORDS 4
 #endif
 
-/* Both launchers verify the full executable hash before native hooks run. */
+/* Original instructions are checked before native hooks run. */
 typedef struct {
   int index, generation;
   void *cached;
@@ -977,24 +978,6 @@ const char *dd_runtime_test_source(void *klass, unsigned index) {
   return catalog && index < catalog->count ? catalog->entries[index].origin
                                            : NULL;
 }
-void dd_runtime_test_override(void *sprite, const char *directory,
-                              void (*native)(void *, const char *)) {
-  runtime_enabled = 1;
-  original_override = native;
-  override_textures(sprite, directory);
-}
-void dd_runtime_test_override_each(void *sprite, const char **directories,
-                                   unsigned count,
-                                   void (*native)(void *, const char *)) {
-  if (count > 256)
-    return;
-  RigPlan plan = {0};
-  plan.count = count;
-  for (unsigned i = 0; i < count; ++i)
-    snprintf(plan.palettes[i], sizeof(plan.palettes[i]), "%s", directories[i]);
-  original_override = native;
-  override_each(sprite, &plan);
-}
 #endif
 #ifdef _WIN32
 #include "skin_rig_windows.h"
@@ -1169,13 +1152,28 @@ static void change_preview(void *panel, void *actor) {
   apply_preview(panel, actor, route);
 }
 
+static const ElfW(Phdr) * main_phdr;
+static size_t main_phnum;
 static int main_image(struct dl_phdr_info *info, size_t size, void *unused) {
   (void)size;
   (void)unused;
   if (info->dlpi_name && *info->dlpi_name)
     return 0;
   base = info->dlpi_addr;
+  main_phdr = info->dlpi_phdr;
+  main_phnum = info->dlpi_phnum;
   return 1;
+}
+static int contains_code(uintptr_t address, size_t length) {
+  for (size_t i = 0; i < main_phnum; ++i) {
+    const ElfW(Phdr) *p = main_phdr + i;
+    uintptr_t start = base + p->p_vaddr;
+    if (p->p_type == PT_LOAD && (p->p_flags & PF_X) && address >= start &&
+        address - start <= p->p_memsz &&
+        length <= p->p_memsz - (address - start))
+      return 1;
+  }
+  return 0;
 }
 static void jump_absolute(unsigned char *out, void *destination) {
   out[0] = 0x48;
@@ -1208,16 +1206,25 @@ __attribute__((constructor)) static void init(void) {
   const char *name = strrchr(executable, '/');
   if (!name || strcmp(name + 1, "darkest.bin.x86_64"))
     return;
-  if (!dl_iterate_phdr(main_image, NULL))
-    _exit(125);
+  dd_linux_log();
+  if (!dl_iterate_phdr(main_image, NULL)) {
+    dprintf(2, "DD_RIG_PATCH_SKIPPED reason=main_image\n");
+    return;
+  }
   if (!runtime_enabled) {
+    if (!map || !*map)
+      return;
     FILE *file = fopen(map, "r");
-    if (!file)
-      _exit(125);
+    if (!file) {
+      dprintf(2, "DD_RIG_PATCH_SKIPPED reason=route_map\n");
+      return;
+    }
     int valid = read_routes(file);
     fclose(file);
-    if (!valid)
-      _exit(125);
+    if (!valid) {
+      dprintf(2, "DD_RIG_PATCH_SKIPPED reason=route_map\n");
+      return;
+    }
   }
   uintptr_t sites[4] = {base + 0xefc214, base + 0xd66e80, base + 0x11a8400,
                         base + 0xa70e10};
@@ -1229,9 +1236,10 @@ __attribute__((constructor)) static void init(void) {
   size_t lengths[4] = {5, 5, 10, 5};
   size_t site_count = runtime_enabled ? 4 : 3;
   for (size_t i = 0; i < site_count; ++i)
-    if (memcmp((void *)sites[i], expected[i], lengths[i])) {
-      dprintf(2, "DD_RIG_PATCH_REFUSED site=%zx\n", sites[i]);
-      _exit(125);
+    if (!contains_code(sites[i], lengths[i]) ||
+        memcmp((void *)sites[i], expected[i], lengths[i])) {
+      dprintf(2, "DD_RIG_PATCH_SKIPPED site=%zx\n", sites[i]);
+      return;
     }
   if (runtime_enabled) {
     const struct {
@@ -1252,16 +1260,29 @@ __attribute__((constructor)) static void init(void) {
                {0xd7b130, "\x48\x8b\x87\x08\x06\x00\x00", 7},
                {0xd7b150, "\x89\xf0\x48\xc1\xe0\x09", 6}};
     for (size_t i = 0; i < sizeof(api) / sizeof(*api); ++i)
-      if (memcmp((void *)(base + api[i].address), api[i].expected,
+      if (!contains_code(base + api[i].address, api[i].length) ||
+          memcmp((void *)(base + api[i].address), api[i].expected,
                  api[i].length)) {
-        dprintf(2, "DD_RIG_API_REFUSED site=%zx\n", api[i].address);
-        _exit(125);
+        dprintf(2, "DD_RIG_API_SKIPPED site=%zx\n", api[i].address);
+        return;
       }
   }
   unsigned char *stubs = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
-  if (stubs == MAP_FAILED)
-    _exit(125);
+  if (stubs == MAP_FAILED) {
+    dprintf(2, "DD_RIG_PATCH_SKIPPED reason=stub_allocation\n");
+    return;
+  }
+  const size_t stub_offsets[] = {0, 96, 160, 224};
+  for (size_t i = 0; i < site_count; ++i) {
+    int64_t delta =
+        (int64_t)(uintptr_t)(stubs + stub_offsets[i]) - (int64_t)(sites[i] + 5);
+    if (delta < INT32_MIN || delta > INT32_MAX) {
+      dprintf(2, "DD_RIG_PATCH_SKIPPED reason=jump_range\n");
+      munmap(stubs, 4096);
+      return;
+    }
+  }
   /* Preserve original calling convention; RBX at this call site is the Hero. */
   memcpy(stubs, "\x48\x89\xda", 3);
   jump_absolute(stubs + 3, new_actor_sprite);
@@ -1294,14 +1315,30 @@ __attribute__((constructor)) static void init(void) {
   load_spine = (void *)(base + 0xc3a260);
   release_spine = (void *)(base + 0xa63a60);
   get_resource = (void *)(base + 0xc3f3f0);
-  if (mprotect(stubs, 4096, PROT_READ | PROT_EXEC))
-    _exit(125);
+  if (mprotect(stubs, 4096, PROT_READ | PROT_EXEC)) {
+    dprintf(2, "DD_RIG_PATCH_SKIPPED reason=stub_protection\n");
+    munmap(stubs, 4096);
+    return;
+  }
   long page_size = sysconf(_SC_PAGESIZE);
+  if (page_size < 16 || (page_size & (page_size - 1))) {
+    dprintf(2, "DD_RIG_PATCH_SKIPPED reason=page_size\n");
+    munmap(stubs, 4096);
+    return;
+  }
   uintptr_t pages[4];
   for (size_t i = 0; i < site_count; ++i) {
     pages[i] = sites[i] & ~((uintptr_t)page_size - 1);
-    if (mprotect((void *)pages[i], (size_t)page_size, PROT_READ | PROT_WRITE))
-      _exit(125);
+    if (sites[i] + lengths[i] > pages[i] + (uintptr_t)page_size ||
+        mprotect((void *)pages[i], (size_t)page_size, PROT_READ | PROT_WRITE)) {
+      for (size_t j = 0; j < i; ++j)
+        if (mprotect((void *)pages[j], (size_t)page_size,
+                     PROT_READ | PROT_EXEC))
+          _exit(125);
+      dprintf(2, "DD_RIG_PATCH_SKIPPED reason=code_protection\n");
+      munmap(stubs, 4096);
+      return;
+    }
   }
   install_jump(
       sites[0],

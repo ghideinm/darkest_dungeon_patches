@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
-#include <dlfcn.h>
+#include "linux_runtime.h"
 #include <elf.h>
-#include <fcntl.h>
 #include <link.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,7 +9,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-/* Linux 28212, SHA256 fe1a629f...1102156. Only immediate operands change. */
+/* Candidate instruction offsets. Only immediate operands change. */
 enum { OLD_CAP = 0x600000, NEW_CAP = 0x2000000, SITE_COUNT = 7 };
 static const uintptr_t sites[SITE_COUNT] = {
     0xc3c288, 0xc3c343, 0xc3c3fa, 0xc3c4b1, 0xc3c568, 0xc3c61f, 0xc3f77f};
@@ -183,8 +182,6 @@ static int apply_render_patch(const struct image *image) {
 }
 
 #ifndef DD_PATCH_SELFTEST
-static uintptr_t game_base;
-static int render_enabled;
 __attribute__((constructor)) static void initialize(void) {
   const char *enabled = getenv("DD_LOADBUFFER_PATCH");
   if (!enabled || strcmp(enabled, "1"))
@@ -193,197 +190,39 @@ __attribute__((constructor)) static void initialize(void) {
   ssize_t length =
       readlink("/proc/self/exe", executable, sizeof(executable) - 1);
   if (length < 0 || (size_t)length >= sizeof(executable) - 1)
-    _exit(125);
+    return;
   executable[length] = '\0';
   const char *name = strrchr(executable, '/');
   if (!name || strcmp(name + 1, "darkest.bin.x86_64"))
     return;
+  dd_linux_log();
   struct image image = {0};
-  if (!dl_iterate_phdr(main_image, &image))
-    _exit(125);
-  game_base = image.base;
+  if (!dl_iterate_phdr(main_image, &image)) {
+    dprintf(STDERR_FILENO, "DD_LOADBUFFER_PATCH_SKIPPED reason=main_image\n");
+    return;
+  }
   int result = apply_patch(&image);
   if (result) {
-    dprintf(STDERR_FILENO, "DD_LOADBUFFER_PATCH_REFUSED code=%d\n", result);
-    _exit(125);
-  }
-  dprintf(STDERR_FILENO,
-          "DD_LOADBUFFER_PATCH_APPLIED cap=%u buffers=6 sites=7\n", NEW_CAP);
+    dprintf(STDERR_FILENO, "DD_LOADBUFFER_PATCH_SKIPPED code=%d\n", result);
+    if (result >= 6) /* A write succeeded but its protection/readback failed. */
+      _exit(125);
+  } else
+    dprintf(STDERR_FILENO,
+            "DD_LOADBUFFER_PATCH_APPLIED cap=%u buffers=6 sites=7\n", NEW_CAP);
   const char *render = getenv("DD_NATIVE_RENDER");
   if (render && !strcmp(render, "1")) {
     result = apply_render_patch(&image);
     if (result) {
-      dprintf(STDERR_FILENO, "DD_NATIVE_RENDER_PATCH_REFUSED code=%d\n",
+      dprintf(STDERR_FILENO, "DD_NATIVE_RENDER_PATCH_SKIPPED code=%d\n",
               result);
-      _exit(125);
-    }
-    render_enabled = 1;
-    dprintf(STDERR_FILENO, "DD_NATIVE_RENDER_PATCH_APPLIED cap=game_canvas "
-                           "sites=7 dungeon=physical_width gui=main_size\n");
-  }
-}
-
-/* Read-only diagnostics at the native swap boundary. No game state, transforms,
- * filtering, lighting or save data are changed here. */
-static uint64_t previous_targets;
-static unsigned swaps;
-static void report_targets(uintptr_t node, unsigned depth,
-                           uint64_t *signature) {
-  if (!node || depth > 16)
-    return;
-  const uintptr_t *links = (const uintptr_t *)node;
-  report_targets(links[2], depth + 1, signature);
-  uintptr_t target;
-  memcpy(&target, (void *)(node + 40), sizeof(target));
-  if (target) {
-    uint32_t fields[5];
-    memcpy(fields, (void *)target, sizeof(fields));
-    for (size_t i = 0; i < 5; ++i)
-      *signature = (*signature ^ fields[i]) * UINT64_C(1099511628211);
-  }
-  report_targets(links[3], depth + 1, signature);
-}
-
-static void print_targets(uintptr_t node, unsigned depth) {
-  if (!node || depth > 16)
-    return;
-  const uintptr_t *links = (const uintptr_t *)node;
-  print_targets(links[2], depth + 1);
-  uintptr_t target;
-  memcpy(&target, (void *)(node + 40), sizeof(target));
-  if (target) {
-    uint32_t fields[5];
-    memcpy(fields, (void *)target, sizeof(fields));
-    dprintf(STDERR_FILENO, "DD_RENDER_TARGET fbo=%u texture=%u size=%ux%u\n",
-            fields[0], fields[1], fields[3], fields[4]);
-  }
-  print_targets(links[3], depth + 1);
-}
-
-static void capture_backbuffer(void *window) {
-  const char *directory = getenv("DD_RENDER_CAPTURE_DIR");
-  if (!directory)
-    return;
-  char request[4096], output[4096];
-  if (snprintf(request, sizeof(request), "%s/capture.request", directory) >=
-          (int)sizeof(request) ||
-      snprintf(output, sizeof(output), "%s/capture.ppm", directory) >=
-          (int)sizeof(output))
-    return;
-  if (access(request, F_OK))
-    return;
-  void (*size)(void *, int *, int *) =
-      dlsym(RTLD_NEXT, "SDL_GL_GetDrawableSize");
-  void (*get)(unsigned, int *) = dlsym(RTLD_NEXT, "glGetIntegerv");
-  void (*read)(int, int, int, int, unsigned, unsigned, void *) =
-      dlsym(RTLD_NEXT, "glReadPixels");
-  void (*pack)(unsigned, int) = dlsym(RTLD_NEXT, "glPixelStorei");
-  void (*bind)(unsigned, unsigned) = dlsym(RTLD_NEXT, "glBindFramebuffer");
-  void (*read_buffer)(unsigned) = dlsym(RTLD_NEXT, "glReadBuffer");
-  if (!size || !get || !read || !pack || !bind || !read_buffer)
-    return;
-  int width = 0, height = 0, framebuffer = -1, alignment = 4;
-  size(window, &width, &height);
-  get(0x8ca6, &framebuffer);
-  if (framebuffer != 0 || width < 1 || height < 1 || width > 8192 ||
-      height > 8192)
-    return;
-  unsigned char *pixels = malloc((size_t)width * height * 3);
-  if (!pixels)
-    return;
-  int previous_read = 0, previous_buffer = 0;
-  get(0x8caa, &previous_read);
-  bind(0x8ca8, 0);
-  get(0x0c02, &previous_buffer);
-  read_buffer(0x0405);
-  get(0x0d05, &alignment);
-  pack(0x0d05, 1);
-  read(0, 0, width, height, 0x1907, 0x1401, pixels);
-  pack(0x0d05, alignment);
-  read_buffer((unsigned)previous_buffer);
-  bind(0x8ca8, (unsigned)previous_read);
-  int fd = open(output, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
-  if (fd >= 0) {
-    FILE *file = fdopen(fd, "wb");
-    if (file) {
-      fprintf(file, "P6\n%d %d\n255\n", width, height);
-      for (int y = height - 1; y >= 0; --y)
-        fwrite(pixels + (size_t)y * width * 3, 3, (size_t)width, file);
-      fclose(file);
-      unlink(request);
-      dprintf(STDERR_FILENO, "DD_RENDER_CAPTURE size=%dx%d file=%s\n", width,
-              height, output);
+      if (result == 24)
+        _exit(125);
     } else
-      close(fd);
+      dprintf(STDERR_FILENO, "DD_NATIVE_RENDER_PATCH_APPLIED cap=game_canvas "
+                             "sites=7 dungeon=physical_width gui=main_size\n");
   }
-  free(pixels);
 }
 
-/* Verify actual private dungeon FBOs too; they are not registered in the
- * RenderTargetManager map. Run once after FBO 5 exists, restoring all bindings.
- */
-static void report_private_targets(void) {
-  static int done;
-  if (done)
-    return;
-  unsigned char (*is_fbo)(unsigned) = dlsym(RTLD_NEXT, "glIsFramebuffer");
-  void (*bind_fbo)(unsigned, unsigned) = dlsym(RTLD_NEXT, "glBindFramebuffer");
-  void (*attachment)(unsigned, unsigned, unsigned, int *) =
-      dlsym(RTLD_NEXT, "glGetFramebufferAttachmentParameteriv");
-  void (*get)(unsigned, int *) = dlsym(RTLD_NEXT, "glGetIntegerv");
-  void (*bind_tex)(unsigned, unsigned) = dlsym(RTLD_NEXT, "glBindTexture");
-  void (*tex_level)(unsigned, int, unsigned, int *) =
-      dlsym(RTLD_NEXT, "glGetTexLevelParameteriv");
-  if (!is_fbo || !bind_fbo || !attachment || !get || !bind_tex || !tex_level ||
-      !is_fbo(5))
-    return;
-  int previous_fbo = 0, previous_texture = 0;
-  get(0x8caa, &previous_fbo);
-  get(0x8069, &previous_texture);
-  for (unsigned id = 1; id <= 5; ++id) {
-    if (!is_fbo(id))
-      continue;
-    bind_fbo(0x8ca8, id);
-    int texture = 0, width = 0, height = 0;
-    attachment(0x8ca8, 0x8ce0, 0x8cd1, &texture);
-    if (!texture)
-      continue;
-    bind_tex(0x0de1, (unsigned)texture);
-    tex_level(0x0de1, 0, 0x1000, &width);
-    tex_level(0x0de1, 0, 0x1001, &height);
-    dprintf(STDERR_FILENO,
-            "DD_RENDER_GPU_TARGET fbo=%u texture=%d size=%dx%d\n", id, texture,
-            width, height);
-  }
-  bind_tex(0x0de1, (unsigned)previous_texture);
-  bind_fbo(0x8ca8, (unsigned)previous_fbo);
-  done = 1;
-}
-
-void SDL_GL_SwapWindow(void *window) {
-  static void (*real_swap)(void *);
-  if (!real_swap)
-    real_swap = dlsym(RTLD_NEXT, "SDL_GL_SwapWindow");
-  if (!real_swap)
-    _exit(125);
-  if (render_enabled && ++swaps % 60 == 0) {
-    uintptr_t manager;
-    memcpy(&manager, (void *)(game_base + 0x1d746d8), sizeof(manager));
-    if (manager) {
-      uintptr_t root;
-      memcpy(&root, (void *)(manager + 16), sizeof(root));
-      uint64_t signature = UINT64_C(14695981039346656037);
-      report_targets(root, 0, &signature);
-      if (signature != previous_targets) {
-        print_targets(root, 0);
-        previous_targets = signature;
-      }
-    }
-    capture_backbuffer(window);
-    report_private_targets();
-  }
-  real_swap(window);
-}
 #else
 int main(void) {
   const size_t length = 0x10b0000;

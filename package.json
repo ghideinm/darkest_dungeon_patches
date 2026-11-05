@@ -2,12 +2,13 @@
   "name": "darkest_dungeon_patches",
   "version": "1.0.0",
   "private": true,
-  "description": "Native Linux engine patches for Darkest Dungeon",
+  "description": "Native Linux and Windows engine patches for Darkest Dungeon",
   "scripts": {
-    "format": "clang-format -i *.c *.h",
-    "check:format": "clang-format --dry-run --Werror *.c *.h",
-    "check:tidy": "clang-tidy *.c --warnings-as-errors='*' -- -std=c11 -Wall -Wextra -Werror && clang-tidy *.c --warnings-as-errors='*' -- -std=c11 -Wall -Wextra -Werror -DDD_PATCH_SELFTEST",
-    "check": "pnpm run check:format && pnpm run check:tidy",
+    "format": "uv run --locked ruff check --fix . && uv run --locked ruff format . && clang-format -i src/native/common/*.[ch] src/native/linux/*.[ch] src/native/windows/*.[ch]",
+    "check:python": "uv run --locked ruff check . && uv run --locked ruff format --check .",
+    "check:format": "clang-format --dry-run --Werror src/native/common/*.[ch] src/native/linux/*.[ch] src/native/windows/*.[ch]",
+    "check:tidy": "clang-tidy src/native/common/*.c src/native/linux/*.c src/native/windows/*.c --warnings-as-errors='*' -- -std=c11 -Wall -Wextra -Werror && clang-tidy src/native/common/*.c src/native/linux/*.c src/native/windows/*.c --warnings-as-errors='*' -- -std=c11 -Wall -Wextra -Werror -DDD_PATCH_SELFTEST",
+    "check": "pnpm run check:python && pnpm run check:format && pnpm run check:tidy",
     "prepare": "husky"
   },
   "packageManager": "pnpm@12.16.1",

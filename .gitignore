@@ -7,4 +7,5 @@ __pycache__/
 *.log
 *.tmp
 .venv/
+.ruff_cache/
 node_modules/

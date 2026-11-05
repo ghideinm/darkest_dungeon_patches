@@ -261,7 +261,7 @@ static __attribute__((noinline)) int windows_patch_init(void) {
   const IMAGE_NT_HEADERS64 *pe = (const void *)(base + (unsigned)dos->e_lfanew);
   if (pe->Signature != IMAGE_NT_SIGNATURE ||
       pe->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
-      pe->OptionalHeader.SizeOfImage != DD_WINDOWS_IMAGE_SIZE)
+      pe->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
     return 0;
   /* Thread-attach notifications can arrive on the game's 64 KiB worker
    * stacks. Never let this long-path buffer become a DllMain stack frame. */
@@ -289,8 +289,17 @@ static __attribute__((noinline)) int windows_patch_init(void) {
   for (size_t t = 0; t < 2; ++t)
     for (size_t i = 0; i < counts[t]; ++i) {
       const WindowsSite *site = tables[t] + i;
-      if (memcmp((void *)(base + site->rva), site->expected, site->length)) {
-        dprintf(2, "DD_RIG_PATCH_REFUSED rva=%x\n", site->rva);
+      MEMORY_BASIC_INFORMATION region;
+      uintptr_t address = base + site->rva;
+      if (site->rva >= pe->OptionalHeader.SizeOfImage ||
+          site->length > pe->OptionalHeader.SizeOfImage - site->rva ||
+          !VirtualQuery((void *)address, &region, sizeof(region)) ||
+          region.AllocationBase != (void *)base || region.State != MEM_COMMIT ||
+          (region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+          site->length >
+              region.RegionSize - (address - (uintptr_t)region.BaseAddress) ||
+          memcmp((void *)address, site->expected, site->length)) {
+        dprintf(2, "DD_RIG_PATCH_SKIPPED rva=%x\n", site->rva);
         return 0;
       }
     }

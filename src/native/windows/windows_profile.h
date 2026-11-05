@@ -2,27 +2,16 @@
 #define DD_WINDOWS_PROFILE_H
 #include <stddef.h>
 #include <stdint.h>
-/* Steam Windows x64 executable, build 25810065. RVAs, never absolute VAs. */
-#define DD_WINDOWS_SHA256                                                      \
-  "4d78fbfaa65b7d002d2208d02da809200f4a5723119521180e30100d6f1a75f2"
-#define DD_WINDOWS_IMAGE_SIZE 0x2fae000U
+/* Candidate RVAs; check original instructions before any runtime writes. */
 #define DD_WINDOWS_RESOURCE_BUFFERS 12
 #define DD_WINDOWS_OLD_CAP 0x1000000U
 #define DD_WINDOWS_NEW_CAP 0x2000000U
-#define DD_WINDOWS_ENTRY_RVA 0xb938e0U
 typedef struct {
   uint32_t rva;
   size_t length;
   size_t operand;
   unsigned char expected[16];
 } WindowsSite;
-static const WindowsSite windows_entry_sites[] = {
-    {DD_WINDOWS_ENTRY_RVA,
-     16,
-     0,
-     {0x48, 0x83, 0xec, 0x28, 0xe8, 0xc7, 0x0c, 0x00, 0x00, 0x48, 0x83, 0xc4,
-      0x28, 0xe9, 0x6e, 0xfe}},
-};
 static const WindowsSite windows_resource_sites[] = {
     {0x37ffc0, 5, 1, {0xb9, 0x00, 0x00, 0x00, 0x01}},
     {0x381ba6,

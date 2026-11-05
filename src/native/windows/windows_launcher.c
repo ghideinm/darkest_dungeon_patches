@@ -4,7 +4,6 @@
 
 #include "windows_arguments.h"
 #include "windows_profile.h"
-#include <bcrypt.h>
 #include <share.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -29,38 +28,6 @@ static void report(const char *format, ...) {
   va_end(copy);
   va_end(arguments);
 }
-static int hash_file(HANDLE file, char output[65]) {
-  BCRYPT_ALG_HANDLE algorithm = NULL;
-  BCRYPT_HASH_HANDLE hash = NULL;
-  unsigned char digest[32], buffer[65536];
-  int valid = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
-                                          NULL, 0) == 0;
-  if (valid)
-    valid = BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0) == 0;
-  DWORD count;
-  while (valid) {
-    if (!ReadFile(file, buffer, sizeof(buffer), &count, NULL)) {
-      valid = 0;
-      break;
-    }
-    if (!count)
-      break;
-    valid = BCryptHashData(hash, buffer, count, 0) == 0;
-  }
-  if (valid)
-    valid = BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0;
-  if (hash)
-    BCryptDestroyHash(hash);
-  if (algorithm)
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-  if (valid) {
-    for (size_t i = 0; i < sizeof(digest); ++i)
-      snprintf(output + i * 2, 3, "%02x", digest[i]);
-    LARGE_INTEGER zero = {0};
-    valid = SetFilePointerEx(file, zero, NULL, FILE_BEGIN) != 0;
-  }
-  return valid;
-}
 static int read_at(HANDLE file, uint64_t offset, void *out, DWORD size) {
   LARGE_INTEGER position;
   position.QuadPart = (LONGLONG)offset;
@@ -68,21 +35,22 @@ static int read_at(HANDLE file, uint64_t offset, void *out, DWORD size) {
   return SetFilePointerEx(file, position, NULL, FILE_BEGIN) &&
          ReadFile(file, out, size, &read, NULL) && read == size;
 }
-static int verify_file_sites(HANDLE file, int runtime_rig) {
+static int read_pe(HANDLE file, IMAGE_DOS_HEADER *dos, IMAGE_NT_HEADERS64 *pe) {
+  return read_at(file, 0, dos, sizeof(*dos)) &&
+         dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew >= 64 &&
+         read_at(file, (unsigned)dos->e_lfanew, pe, sizeof(*pe)) &&
+         pe->Signature == IMAGE_NT_SIGNATURE &&
+         pe->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+         pe->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC &&
+         pe->FileHeader.NumberOfSections > 0 &&
+         pe->FileHeader.NumberOfSections <= 32 &&
+         pe->FileHeader.SizeOfOptionalHeader == sizeof(IMAGE_OPTIONAL_HEADER64);
+}
+static int verify_file_sites(HANDLE file, int runtime_rig, int native_render) {
   IMAGE_DOS_HEADER dos;
   IMAGE_NT_HEADERS64 pe;
   LARGE_INTEGER file_size;
-  if (!GetFileSizeEx(file, &file_size) ||
-      !read_at(file, 0, &dos, sizeof(dos)) ||
-      dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < 64 ||
-      dos.e_lfanew > 4096 ||
-      !read_at(file, (unsigned)dos.e_lfanew, &pe, sizeof(pe)) ||
-      pe.Signature != IMAGE_NT_SIGNATURE ||
-      pe.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
-      pe.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
-      pe.OptionalHeader.SizeOfImage != DD_WINDOWS_IMAGE_SIZE ||
-      pe.FileHeader.NumberOfSections > 32 ||
-      pe.FileHeader.SizeOfOptionalHeader != sizeof(IMAGE_OPTIONAL_HEADER64))
+  if (!GetFileSizeEx(file, &file_size) || !read_pe(file, &dos, &pe))
     return 0;
   IMAGE_SECTION_HEADER sections[32];
   if (!read_at(file, (unsigned)dos.e_lfanew + sizeof(pe), sections,
@@ -96,7 +64,7 @@ static int verify_file_sites(HANDLE file, int runtime_rig) {
                      sizeof(windows_render_sites) / sizeof(WindowsSite)};
   for (size_t t = 0; t < 4; ++t)
     for (size_t i = 0; i < counts[t]; ++i) {
-      if ((t == 1 || t == 2) && !runtime_rig)
+      if (((t == 1 || t == 2) && !runtime_rig) || (t == 3 && !native_render))
         continue;
       const WindowsSite *site = tables[t] + i;
       int found = 0;
@@ -115,7 +83,7 @@ static int verify_file_sites(HANDLE file, int runtime_rig) {
           found = 1;
       }
       if (!found) {
-        report("DD_WINDOWS_FILE_REFUSED rva=%x\n", site->rva);
+        report("DD_WINDOWS_FILE_MISMATCH rva=%x\n", site->rva);
         return 0;
       }
     }
@@ -179,24 +147,43 @@ static int patch_resources(HANDLE process, uintptr_t base) {
          DD_WINDOWS_RESOURCE_BUFFERS, DD_WINDOWS_NEW_CAP);
   return 1;
 }
-static int entry_breakpoint(HANDLE process, uintptr_t image, int install) {
-  const WindowsSite *site = windows_entry_sites;
-  unsigned char actual[16];
+typedef struct {
+  uintptr_t address;
+  unsigned char original;
+} EntryBreakpoint;
+static int find_entry(HANDLE process, uintptr_t image, EntryBreakpoint *entry) {
+  IMAGE_DOS_HEADER dos;
+  IMAGE_NT_HEADERS64 pe;
   SIZE_T count;
-  void *entry = (void *)(image + site->rva);
-  if (!ReadProcessMemory(process, entry, actual, site->length, &count) ||
-      count != site->length ||
-      (install ? memcmp(actual, site->expected, site->length)
-               : (actual[0] != 0xcc ||
-                  memcmp(actual + 1, site->expected + 1, site->length - 1))))
+  if (!ReadProcessMemory(process, (void *)image, &dos, sizeof(dos), &count) ||
+      count != sizeof(dos) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
+      dos.e_lfanew < 64 ||
+      !ReadProcessMemory(process, (void *)(image + (unsigned)dos.e_lfanew), &pe,
+                         sizeof(pe), &count) ||
+      count != sizeof(pe) || pe.Signature != IMAGE_NT_SIGNATURE ||
+      !pe.OptionalHeader.AddressOfEntryPoint ||
+      pe.OptionalHeader.AddressOfEntryPoint >= pe.OptionalHeader.SizeOfImage)
     return 0;
-  unsigned char value = install ? 0xcc : site->expected[0];
+  entry->address = image + pe.OptionalHeader.AddressOfEntryPoint;
+  return ReadProcessMemory(process, (void *)entry->address, &entry->original, 1,
+                           &count) &&
+         count == 1;
+}
+static int entry_breakpoint(HANDLE process, const EntryBreakpoint *entry,
+                            int install) {
+  unsigned char actual;
+  SIZE_T count;
+  void *address = (void *)entry->address;
+  if (!ReadProcessMemory(process, address, &actual, 1, &count) || count != 1 ||
+      actual != (install ? entry->original : 0xcc))
+    return 0;
+  unsigned char value = install ? 0xcc : entry->original;
   DWORD previous, ignored;
-  if (!VirtualProtectEx(process, entry, 1, PAGE_EXECUTE_READWRITE, &previous))
+  if (!VirtualProtectEx(process, address, 1, PAGE_EXECUTE_READWRITE, &previous))
     return 0;
-  int valid = WriteProcessMemory(process, entry, &value, 1, &count) &&
-              count == 1 && FlushInstructionCache(process, entry, 1);
-  if (!VirtualProtectEx(process, entry, 1, previous, &ignored))
+  int valid = WriteProcessMemory(process, address, &value, 1, &count) &&
+              count == 1 && FlushInstructionCache(process, address, 1);
+  if (!VirtualProtectEx(process, address, 1, previous, &ignored))
     valid = 0;
   return valid;
 }
@@ -269,117 +256,24 @@ static void close_debug_files(DEBUG_EVENT *event) {
   }
   /* ContinueDebugEvent owns the event's process/thread handles. */
 }
-static void report_exception(const PROCESS_INFORMATION *process,
-                             const DEBUG_EVENT *event, uintptr_t image) {
+static void report_exception(const DEBUG_EVENT *event, uintptr_t image) {
   const EXCEPTION_DEBUG_INFO *exception = &event->u.Exception;
   uintptr_t at = (uintptr_t)exception->ExceptionRecord.ExceptionAddress;
   report("DD_WINDOWS_EXCEPTION code=%lx first_chance=%lu address=%llx "
          "image=%llx rva=%llx\n",
          exception->ExceptionRecord.ExceptionCode, exception->dwFirstChance,
          (unsigned long long)at, (unsigned long long)image,
-         (unsigned long long)(at >= image && at < image + DD_WINDOWS_IMAGE_SIZE
-                                  ? at - image
-                                  : UINT64_MAX));
+         (unsigned long long)(at >= image ? at - image : UINT64_MAX));
   if (exception->ExceptionRecord.ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
       exception->ExceptionRecord.NumberParameters >= 2)
     report(
         "DD_WINDOWS_ACCESS kind=%llu target=%llx\n",
         (unsigned long long)exception->ExceptionRecord.ExceptionInformation[0],
         (unsigned long long)exception->ExceptionRecord.ExceptionInformation[1]);
-  HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
-                             FALSE, event->dwThreadId);
-  CONTEXT context = {0};
-  context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-  if (thread && GetThreadContext(thread, &context)) {
-    report("DD_WINDOWS_REGISTERS rip=%llx rsp=%llx rbp=%llx rax=%llx rbx=%llx "
-           "rcx=%llx rdx=%llx rsi=%llx rdi=%llx r8=%llx r9=%llx r12=%llx "
-           "r13=%llx r14=%llx r15=%llx\n",
-           context.Rip, context.Rsp, context.Rbp, context.Rax, context.Rbx,
-           context.Rcx, context.Rdx, context.Rsi, context.Rdi, context.R8,
-           context.R9, context.R12, context.R13, context.R14, context.R15);
-    uint64_t stack[32] = {0};
-    SIZE_T read = 0;
-    (void)ReadProcessMemory(process->hProcess, (void *)(uintptr_t)context.Rsp,
-                            stack, sizeof(stack), &read);
-    for (size_t i = 0; i < read / sizeof(stack[0]); ++i)
-      report("DD_WINDOWS_STACK offset=%zu value=%llx\n", i * 8,
-             (unsigned long long)stack[i]);
-  }
-  if (thread)
-    CloseHandle(thread);
-}
-static int read_game_memory(HANDLE process, uintptr_t address, void *out,
-                            size_t length) {
-  SIZE_T read;
-  return ReadProcessMemory(process, (void *)address, out, length, &read) &&
-         read == length;
-}
-static void report_target_node(HANDLE process, uintptr_t node, unsigned depth,
-                               unsigned *count) {
-  unsigned char data[0x30];
-  if (!node || depth > 32 || *count >= 128 ||
-      !read_game_memory(process, node, data, sizeof(data)) || data[0x19])
-    return;
-  uintptr_t left, right, target;
-  uint32_t key, width, height;
-  memcpy(&left, data, sizeof(left));
-  memcpy(&right, data + 0x10, sizeof(right));
-  memcpy(&key, data + 0x20, sizeof(key));
-  memcpy(&target, data + 0x28, sizeof(target));
-  ++*count;
-  report_target_node(process, left, depth + 1, count);
-  if (target &&
-      read_game_memory(process, target + 0xc, &width, sizeof(width)) &&
-      read_game_memory(process, target + 0x10, &height, sizeof(height)))
-    report("DD_WINDOWS_RENDER_TARGET key=%08x width=%u height=%u\n", key, width,
-           height);
-  report_target_node(process, right, depth + 1, count);
-}
-static void report_render_targets(HANDLE process, uintptr_t image) {
-  uintptr_t manager, head, root;
-  if (read_game_memory(process, image + 0x1174ad0, &manager, sizeof(manager)) &&
-      manager && read_game_memory(process, manager, &head, sizeof(head)) &&
-      head && read_game_memory(process, head + 8, &root, sizeof(root))) {
-    unsigned count = 0;
-    report_target_node(process, root, 0, &count);
-  }
-}
-static int observe_startup(const PROCESS_INFORMATION *process,
-                           uintptr_t image) {
-  ULONGLONG deadline = GetTickCount64() + 20000;
-  DEBUG_EVENT event;
-  while (GetTickCount64() < deadline) {
-    if (!WaitForDebugEvent(&event, 250)) {
-      if (GetLastError() == ERROR_SEM_TIMEOUT)
-        continue;
-      return 0;
-    }
-    close_debug_files(&event);
-    DWORD disposition = DBG_CONTINUE;
-    int exited = event.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT;
-    if (exited)
-      report("DD_WINDOWS_GAME_EXIT code=%lu hex=%lx\n",
-             event.u.ExitProcess.dwExitCode, event.u.ExitProcess.dwExitCode);
-    if (event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT) {
-      DWORD code = event.u.Exception.ExceptionRecord.ExceptionCode;
-      disposition = DBG_EXCEPTION_NOT_HANDLED;
-      if (!event.u.Exception.dwFirstChance ||
-          code == EXCEPTION_ACCESS_VIOLATION ||
-          code == EXCEPTION_ILLEGAL_INSTRUCTION || code == 0xc0000409)
-        report_exception(process, &event, image);
-    }
-    if (!ContinueDebugEvent(event.dwProcessId, event.dwThreadId, disposition))
-      return 0;
-    if (exited)
-      return 0;
-  }
-  report_render_targets(process->hProcess, image);
-  report("DD_WINDOWS_STARTUP_OBSERVED seconds=20\n");
-  return 1;
 }
 static int launch_game(const wchar_t *game, wchar_t *command,
                        const wchar_t *directory, const wchar_t *library,
-                       int runtime_rig, int native_render, int diagnose) {
+                       int runtime_rig, int native_render) {
   uintptr_t ready_rva = 0;
   if (runtime_rig) {
     HMODULE module = LoadLibraryExW(library, NULL, DONT_RESOLVE_DLL_REFERENCES);
@@ -395,11 +289,18 @@ static int launch_game(const wchar_t *game, wchar_t *command,
   STARTUPINFOW startup = {0};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process = {0};
-  if (!CreateProcessW(game, command, NULL, NULL, FALSE, DEBUG_ONLY_THIS_PROCESS,
-                      NULL, directory, &startup, &process))
+  wchar_t *mutable_command = _wcsdup(command);
+  if (!mutable_command)
+    return 0;
+  int created = CreateProcessW(game, mutable_command, NULL, NULL, FALSE,
+                               DEBUG_ONLY_THIS_PROCESS, NULL, directory,
+                               &startup, &process) != 0;
+  free(mutable_command);
+  if (!created)
     return 0;
   ULONGLONG deadline = GetTickCount64() + 45000;
   uintptr_t image = 0;
+  EntryBreakpoint entry = {0};
   int initialized = 0, success = 0, held = 0, suspended = 0, armed = 0;
   DEBUG_EVENT event = {0};
   DWORD remote_thread_id = 0;
@@ -429,19 +330,20 @@ static int launch_game(const wchar_t *game, wchar_t *command,
       if (!initialized && !armed && code == EXCEPTION_BREAKPOINT) {
         /* The loader's first breakpoint can still hold its loader lock.
          * Continue to our own EXE-entry breakpoint before loading a DLL. */
-        if (!image || !entry_breakpoint(process.hProcess, image, 1))
+        if (!image || !find_entry(process.hProcess, image, &entry) ||
+            !entry_breakpoint(process.hProcess, &entry, 1))
           break;
         armed = 1;
         disposition = DBG_CONTINUE;
       } else if (!initialized && armed && code == EXCEPTION_BREAKPOINT &&
-                 trap == image + DD_WINDOWS_ENTRY_RVA &&
+                 trap == entry.address &&
                  event.dwThreadId == process.dwThreadId) {
         CONTEXT context = {0};
         context.ContextFlags = CONTEXT_CONTROL;
-        if (!entry_breakpoint(process.hProcess, image, 0) ||
+        if (!entry_breakpoint(process.hProcess, &entry, 0) ||
             !GetThreadContext(process.hThread, &context))
           break;
-        context.Rip = image + DD_WINDOWS_ENTRY_RVA;
+        context.Rip = entry.address;
         if (!SetThreadContext(process.hThread, &context) ||
             !verify_remote(process.hProcess, image, runtime_rig,
                            native_render) ||
@@ -470,7 +372,7 @@ static int launch_game(const wchar_t *game, wchar_t *command,
         } else
           success = 1;
       } else if (!event.u.Exception.dwFirstChance) {
-        report_exception(&process, &event, image);
+        report_exception(&event, image);
         break;
       }
     }
@@ -501,12 +403,6 @@ static int launch_game(const wchar_t *game, wchar_t *command,
   if (success && !held) {
     if (remote_path)
       VirtualFreeEx(process.hProcess, remote_path, 0, MEM_RELEASE);
-    if (diagnose) {
-      success = ResumeThread(process.hThread) != (DWORD)-1;
-      suspended = 0;
-      if (success)
-        success = observe_startup(&process, image);
-    }
     if (success)
       success = DebugActiveProcessStop(process.dwProcessId) != 0;
     if (success && suspended)
@@ -518,7 +414,9 @@ static int launch_game(const wchar_t *game, wchar_t *command,
     TerminateProcess(process.hProcess, 125);
     if (held)
       ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE);
-    report("DD_WINDOWS_LAUNCH_REFUSED error=%lu\n", error);
+    (void)DebugActiveProcessStop(process.dwProcessId);
+    (void)WaitForSingleObject(process.hProcess, 5000);
+    report("DD_WINDOWS_PATCH_FAILED error=%lu\n", error);
   } else
     report("DD_WINDOWS_LAUNCHED pid=%lu runtime_rig=%d disk_modified=0\n",
            process.dwProcessId, runtime_rig);
@@ -528,6 +426,25 @@ static int launch_game(const wchar_t *game, wchar_t *command,
   CloseHandle(process.hProcess);
   return success;
 }
+static int launch_unmodified(const wchar_t *game, const wchar_t *command,
+                             const wchar_t *directory) {
+  STARTUPINFOW startup = {0};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process = {0};
+  wchar_t *mutable_command = _wcsdup(command);
+  if (!mutable_command)
+    return 0;
+  int result = CreateProcessW(game, mutable_command, NULL, NULL, FALSE, 0, NULL,
+                              directory, &startup, &process) != 0;
+  free(mutable_command);
+  if (result) {
+    report("DD_WINDOWS_UNMODIFIED_LAUNCHED pid=%lu\n", process.dwProcessId);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+  } else
+    report("DD_WINDOWS_GAME_START_FAILED error=%lu\n", GetLastError());
+  return result;
+}
 static int steam_game_path(const wchar_t *original, wchar_t game[32768]) {
   DWORD count = GetFullPathNameW(original, 32768, game, NULL);
   const wchar_t *x64 = L"\\_windows\\win64\\Darkest.exe";
@@ -535,18 +452,20 @@ static int steam_game_path(const wchar_t *original, wchar_t game[32768]) {
   if (!count || count >= 32768)
     return 0;
   size_t length = wcslen(game), size64 = wcslen(x64), size32 = wcslen(x86);
-  if (length >= size64 && !_wcsicmp(game + length - size64, x64))
-    return 1;
-  if (length < size32 || _wcsicmp(game + length - size32, x86) ||
-      length - size32 + size64 >= 32768)
-    return 0;
-  wcscpy(game + length - size32, x64);
+  if (length >= size32 && !_wcsicmp(game + length - size32, x86) &&
+      length - size32 + size64 < 32768) {
+    wchar_t candidate[32768];
+    wcscpy(candidate, game);
+    wcscpy(candidate + length - size32, x64);
+    if (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
+      wcscpy(game, candidate);
+  }
   return 1;
 }
 int wmain(int argc, wchar_t **argv) {
   wchar_t game[32768] = {0}, home[32768], library[32768], command[32768] = {0};
-  int check = 0, runtime_rig = 1, native_render = 1, diagnose = 0,
-      remaining = argc, steam_mode = 0;
+  int check = 0, runtime_rig = 1, native_render = 1, remaining = argc,
+      steam_mode = 0;
   for (int i = 1; i < argc; ++i) {
     if (!wcscmp(argv[i], L"--check"))
       check = 1;
@@ -554,8 +473,6 @@ int wmain(int argc, wchar_t **argv) {
       native_render = 1;
     else if (!wcscmp(argv[i], L"--no-native-render"))
       native_render = 0;
-    else if (!wcscmp(argv[i], L"--diagnose"))
-      diagnose = 1;
     else if (!wcscmp(argv[i], L"--resources-only")) {
       runtime_rig = 0;
       native_render = 0;
@@ -603,44 +520,51 @@ int wmain(int argc, wchar_t **argv) {
   if (!check) {
     log_file = _wfsopen(log_path, L"w", _SH_DENYNO);
     if (!log_file)
-      return 125;
+      report("DD_WINDOWS_LOG_UNAVAILABLE error=%lu\n", GetLastError());
     SetEnvironmentVariableW(L"DD_WINDOWS_PATCH_LOG", log_path);
   }
   HANDLE file = CreateFileW(game, GENERIC_READ, FILE_SHARE_READ, NULL,
                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-  char hash[65];
-  int valid = file != INVALID_HANDLE_VALUE && hash_file(file, hash) &&
-              !strcmp(hash, DD_WINDOWS_SHA256) &&
-              verify_file_sites(file, runtime_rig);
-  if (!valid) {
-    report("DD_WINDOWS_IDENTITY_REFUSED error=%lu\n", GetLastError());
-    if (file != INVALID_HANDLE_VALUE)
-      CloseHandle(file);
-    return 125;
-  }
-  report("DD_WINDOWS_IDENTITY_OK sha256=%s resource_sites=3 rig_hooks=%d\n",
-         hash, runtime_rig ? 4 : 0);
-  if (check) {
+  IMAGE_DOS_HEADER dos;
+  IMAGE_NT_HEADERS64 pe;
+  int readable = file != INVALID_HANDLE_VALUE && read_pe(file, &dos, &pe);
+  int compatible =
+      readable && verify_file_sites(file, runtime_rig, native_render);
+  if (file != INVALID_HANDLE_VALUE)
     CloseHandle(file);
-    return 0;
-  }
+  if (!compatible)
+    report("DD_WINDOWS_PATCH_SKIPPED reason=%s\n",
+           readable ? "instruction_mismatch" : "executable_format");
+  if (check)
+    return readable ? 0 : 125;
   wchar_t directory[32768];
   wcscpy(directory, game);
-  for (int i = 0; i < 3; ++i) {
+  const wchar_t *suffix = L"\\_windows\\win64\\Darkest.exe";
+  const wchar_t *x86_suffix = L"\\_windows\\Darkest.exe";
+  size_t length = wcslen(directory), suffix_length = wcslen(suffix);
+  int parents = 1;
+  if (length >= suffix_length &&
+      !_wcsicmp(directory + length - suffix_length, suffix))
+    parents = 3;
+  else if (length >= wcslen(x86_suffix) &&
+           !_wcsicmp(directory + length - wcslen(x86_suffix), x86_suffix))
+    parents = 2;
+  for (int i = 0; i < parents; ++i) {
     slash = wcsrchr(directory, L'\\');
-    if (!slash) {
-      CloseHandle(file);
+    if (!slash)
       return 125;
-    }
-    *slash = 0;
+    if (slash == directory + 2 && directory[1] == L':')
+      slash[1] = 0;
+    else
+      *slash = 0;
   }
-  valid = append_argument(command, 32768, game);
+  int valid = append_argument(command, 32768, game);
   int has_steam_default = 0;
   for (int i = remaining; i < argc; ++i)
     if (!wcscmp(argv[i], L"-skipvalidation"))
       has_steam_default = 1;
   /* App 262060's native Windows launch configuration supplies this flag.
-   * Retain Steam's normal startup contract when launching the verified EXE. */
+   * Retain Steam's normal startup contract when launching the game EXE. */
   if (valid && !has_steam_default)
     valid = append_argument(command, 32768, L"-skipvalidation");
   for (int i = remaining; valid && i < argc; ++i)
@@ -650,9 +574,14 @@ int wmain(int argc, wchar_t **argv) {
   SetEnvironmentVariableW(L"SteamAppId", L"262060");
   SetEnvironmentVariableW(L"SteamGameId", L"262060");
   SetEnvironmentVariableW(L"DD_RIG_MAP", NULL);
-  int result = valid && launch_game(game, command, directory, library,
-                                    runtime_rig, native_render, diagnose);
-  CloseHandle(file);
+  int result = valid && compatible &&
+               launch_game(game, command, directory, library, runtime_rig,
+                           native_render);
+  if (valid && !result) {
+    if (compatible)
+      report("DD_WINDOWS_PATCH_SKIPPED reason=initialization_failed\n");
+    result = launch_unmodified(game, command, directory);
+  }
   if (log_file)
     fclose(log_file);
   return result ? 0 : 125;

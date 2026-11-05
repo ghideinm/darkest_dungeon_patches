@@ -184,6 +184,22 @@ function Find-SteamGame([string]$Root) {
 function Assert-SteamStopped {
     if (Get-Process -Name steam,Darkest -ErrorAction SilentlyContinue) { throw 'Save and exit Darkest Dungeon and Steam normally before installing or uninstalling.' }
 }
+function Assert-GameExecutable([string]$Path) {
+    # Inspect only the executable format; game versions and full-file hashes
+    # are deliberately not an installation requirement.
+    $stream = [IO.File]::OpenRead($Path)
+    $reader = [IO.BinaryReader]::new($stream)
+    try {
+        if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5a4d) { throw 'Invalid Windows x64 game EXE format.' }
+        $stream.Position = 0x3c
+        $pe = $reader.ReadUInt32()
+        if ($pe -lt 64 -or $pe + 264 -gt $stream.Length) { throw 'Invalid Windows x64 game EXE format.' }
+        $stream.Position = $pe
+        if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664) { throw 'Invalid Windows x64 game EXE format.' }
+        $stream.Position = $pe + 24
+        if ($reader.ReadUInt16() -ne 0x20b) { throw 'Invalid Windows x64 game EXE format.' }
+    } finally { $reader.Dispose() }
+}
 function Invoke-SteamSetup {
     if (-not $SteamRoot) { $SteamRoot = Find-SteamRoot }
     $SteamRoot = [IO.Path]::GetFullPath($SteamRoot)
@@ -209,7 +225,7 @@ function Invoke-SteamSetup {
     }
     if (-not $GameRoot) { $GameRoot = Find-SteamGame $SteamRoot }
     $game = Join-Path ([IO.Path]::GetFullPath($GameRoot)) '_windows\win64\Darkest.exe'
-    if ((Get-FileHash -LiteralPath $game -Algorithm SHA256).Hash.ToLowerInvariant() -ne '4d78fbfaa65b7d002d2208d02da809200f4a5723119521180e30100d6f1a75f2') { throw 'Unsupported Windows x64 game EXE.' }
+    Assert-GameExecutable $game
     $launcher = Join-Path $InstallRoot 'dd_windows_launcher.exe'
     $previous = if ($state) { $state.previous_launch_options } else { $current }
     $options = Get-WrappedLaunchOptions $launcher $previous
@@ -234,7 +250,7 @@ function Invoke-SteamSetup {
         $info = [Diagnostics.ProcessStartInfo]::new(); $info.FileName=$launcher
         $info.Arguments='--game "'+$game+'" --check'; $info.UseShellExecute=$false; $info.WorkingDirectory=$InstallRoot
         $process = [Diagnostics.Process]::new(); $process.StartInfo=$info
-        try { if(-not $process.Start()){throw 'Native check failed to start.'};$process.WaitForExit();if($process.ExitCode -ne 0){throw 'Native game identity or instruction check failed.'} } finally {$process.Dispose()}
+        try { if(-not $process.Start()){throw 'Native check failed to start.'};$process.WaitForExit();if($process.ExitCode -ne 0){throw 'Native executable format check failed.'} } finally {$process.Dispose()}
         $newState = [ordered]@{version=1;app_id='262060';localconfig=$config;previous_launch_options=$previous;launch_options=$options;game=$game;runtime_python_required=$false}
         Write-AtomicBytes $statePath ([Text.UTF8Encoding]::new($false).GetBytes(($newState|ConvertTo-Json -Depth 3)))
         Assert-SteamStopped

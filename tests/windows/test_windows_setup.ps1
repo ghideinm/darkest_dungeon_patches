@@ -52,12 +52,27 @@ try {
     [IO.File]::WriteAllBytes($binary,[byte[]](77,90,0,0))
     $rejected = Invoke-Native $setup ('--preview '+$options+' --game-root "'+$game+'"')
     Assert ($rejected -ne 0) 'Unsupported game was accepted.'
-    Assert ([IO.File]::ReadAllText($log).Contains('Unsupported Windows x64 game EXE')) 'Unexpected EXE payload failure.'
+    Assert ([IO.File]::ReadAllText($log).Contains('Invalid Windows x64 game EXE format')) 'Unexpected EXE payload failure.'
     Assert ([IO.File]::ReadAllText($config) -ceq $original) 'Rejection changed Steam configuration.'
     Assert (-not (Test-Path -LiteralPath $install)) 'Rejection installed a payload.'
     $native = Invoke-Native (Join-Path $BundleRoot 'dd_windows_launcher.exe') ('--game "'+$binary+'" --check')
-    Assert ($native -eq 125) 'Native injector did not refuse an unknown game.'
-    Write-Host 'Windows EXE payload, PowerShell 5 setup, checksums and refusal checks passed.'
+    Assert ($native -eq 125) 'Native injector accepted an invalid executable.'
+    # A generated valid PE format with no matching instructions is accepted;
+    # no game build number or full-file hash is needed for installation.
+    $header = New-Object byte[] 512
+    $header[0]=77; $header[1]=90
+    [BitConverter]::GetBytes([uint32]128).CopyTo($header,60)
+    [BitConverter]::GetBytes([uint32]0x4550).CopyTo($header,128)
+    [BitConverter]::GetBytes([uint16]0x8664).CopyTo($header,132)
+    [BitConverter]::GetBytes([uint16]1).CopyTo($header,134)
+    [BitConverter]::GetBytes([uint16]240).CopyTo($header,148)
+    [BitConverter]::GetBytes([uint16]0x20b).CopyTo($header,152)
+    [IO.File]::WriteAllBytes($binary,$header)
+    $preview = Invoke-Native $setup ('--preview '+$options+' --game-root "'+$game+'"')
+    Assert ($preview -eq 0) 'Preview blocked a valid unknown-layout executable.'
+    $native = Invoke-Native (Join-Path $BundleRoot 'dd_windows_launcher.exe') ('--game "'+$binary+'" --check')
+    Assert ($native -eq 0) 'Native check blocked a valid unknown-layout executable.'
+    Write-Host 'Windows EXE payload, PowerShell 5 setup, checksums and compatibility checks passed.'
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force
 }
