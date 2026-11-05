@@ -6,6 +6,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from address_fixtures import make_fixture, write_pe
 
 from darkest_dungeon_patches import windows_port
 from darkest_dungeon_patches.paths import COMMON_NATIVE, WINDOWS_NATIVE, WINDOWS_SCRIPTS
@@ -188,84 +191,34 @@ $removed=Invoke-SteamSetup
 
 
 class WindowsProfileTest(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="dd-pe-profile-unit-")
-        self.addCleanup(self.temporary.cleanup)
-        self.executable = Path(self.temporary.name) / "fixture.exe"
-        self.tables = windows_port.profile()
-        self.image_size = 0x1000000
-        rva = 0x200000
-        end = max(at + len(expected) for rows in self.tables.values() for at, expected, _ in rows)
-        size = (end - rva + 0xFFF) & ~0xFFF
-        self.data = bytearray(512 + size)
-        self.data[:2] = b"MZ"
-        pe = 0x80
-        struct.pack_into("<I", self.data, 0x3C, pe)
-        self.data[pe : pe + 4] = b"PE\0\0"
-        struct.pack_into("<HH", self.data, pe + 4, 0x8664, 1)
-        struct.pack_into("<H", self.data, pe + 20, 240)
-        struct.pack_into("<H", self.data, pe + 24, 0x20B)
-        struct.pack_into("<I", self.data, pe + 80, self.image_size)
-        struct.pack_into(
-            "<8sIIIIIIHHI",
-            self.data,
-            pe + 264,
-            b".fixture",
-            size,
-            rva,
-            size,
-            512,
-            0,
-            0,
-            0,
-            0,
-            0x60000020,
-        )
-        for rows in self.tables.values():
-            for at, expected, _ in rows:
-                offset = 512 + at - rva
-                self.data[offset : offset + len(expected)] = expected
-        self.executable.write_bytes(self.data)
-
-    def validate(self):
-        return windows_port.validate(self.executable)
-
-    def test_accepts_complete_instruction_fixture(self):
-        result = self.validate()
-        self.assertTrue(result["compatible"])
-        self.assertEqual(result["resource_patch_sites"], 3)
-        self.assertEqual(result["rig_hook_sites"], 4)
-        self.assertFalse(result["disk_binary_modified"])
-        self.assertFalse(result["runtime_verified"])
-
-    def test_accepts_changes_outside_patch_sites_and_image_size(self):
-        self.data[-1] ^= 1
-        self.executable.write_bytes(self.data)
-        struct.pack_into("<I", self.data, 0x80 + 80, self.image_size + 4096)
-        self.executable.write_bytes(self.data)
-        self.assertTrue(self.validate()["compatible"])
-
-    def test_rejects_wrong_architecture(self):
-        struct.pack_into("<H", self.data, 0x84, 0x14C)
-        self.executable.write_bytes(self.data)
-        with self.assertRaisesRegex(ValueError, "architecture"):
-            self.validate()
-
-    def test_reports_mismatched_instruction_without_blocking(self):
-        at, _, _ = self.tables["resource"][0]
-        self.data[512 + at - 0x200000] ^= 1
-        self.executable.write_bytes(self.data)
-        result = self.validate()
-        self.assertFalse(result["compatible"])
-        self.assertIn("instruction", result["compatibility_issues"][0])
+    def test_offline_check_accepts_moved_code_and_data(self):
+        with tempfile.TemporaryDirectory(prefix="dd-pe-profile-unit-") as directory:
+            root = Path(directory)
+            for code, data in ((0x200000, 0x300000), (0x650000, 0x840000)):
+                fixture = make_fixture(root, "windows", code, data)
+                path = root / "fixture.exe"
+                write_pe(path, fixture)
+                with patch.object(windows_port, "signatures", return_value=fixture.features):
+                    result = windows_port.validate(path)
+                    self.assertTrue(result["compatible"], result["compatibility_issues"])
+                    self.assertEqual(result["resolved_symbols"], fixture.symbols)
+                    fixture.code[fixture.symbols["RESOURCE_0"] - code] ^= 1
+                    write_pe(path, fixture)
+                    result = windows_port.validate(path)
+                    self.assertFalse(result["compatible"])
+                raw = bytearray(path.read_bytes())
+                struct.pack_into("<H", raw, 132, 0x14C)
+                path.write_bytes(raw)
+                with self.assertRaisesRegex(ValueError, "architecture"):
+                    windows_port.validate(path)
 
 
 class WindowsBootstrapTest(unittest.TestCase):
     def test_windows_bootstrap_on_synthetic_process(self):
         """Exercise entry breakpoint, DLL readiness, writes and detach in Wine.
 
-        The child is our own program with sparse signature fixtures. It
-        contains no complete game function and executes only its own code.
+        The child executes only its own code. Its separate code/data sections
+        contain test-owned marker features and patch-operation prefixes.
         Explicit tool paths opt in; ordinary regressions need neither Wine nor
         a Windows compiler.
         """
@@ -286,7 +239,7 @@ int wmain(void) {
   if (GetEnvironmentVariableW(L"DD_FIXTURE_EXPECT_ORIGINAL", NULL, 0)) {
     const unsigned char *image = (const void *)GetModuleHandleW(NULL);
     unsigned cap;
-    memcpy(&cap, image + 0x37ffc1, sizeof(cap));
+    memcpy(&cap, image + DD_FIXTURE_RESOURCE_RVA, sizeof(cap));
     if (cap != 0x1000000) return 5;
   }
   HANDLE thread = CreateThread(NULL, 65536, worker, NULL,
@@ -314,44 +267,57 @@ int wmain(void) {
                 "-I",
                 str(WINDOWS_NATIVE),
             ]
+            fixture = make_fixture(root, "windows", 0x650000, 0x840000)
+            common.append("-DDD_FIXTURE_RESOURCE_RVA=" + hex(fixture.symbols["RESOURCE_0"] + 1))
+            common.append('-DDD_ADDRESS_TEST_PROFILE="' + str(fixture.header) + '"')
             executable = root / "fixture.exe"
-            subprocess.run([*common, "-municode", str(child), "-o", str(executable)], check=True)
+            subprocess.run(
+                [
+                    *common,
+                    "-municode",
+                    str(child),
+                    "-Wl,--file-alignment,4096",
+                    "-o",
+                    str(executable),
+                ],
+                check=True,
+            )
             data = bytearray(executable.read_bytes())
-            pe = struct.unpack_from("<I", data, 0x3C)[0]
+            pe = struct.unpack_from("<I", data, 60)[0]
             count = struct.unpack_from("<H", data, pe + 6)[0]
             optional_size = struct.unpack_from("<H", data, pe + 20)[0]
-            alignment = struct.unpack_from("<I", data, pe + 60)[0]
-            header_size = struct.unpack_from("<I", data, pe + 84)[0]
             section = pe + 24 + optional_size + count * 40
-            self.assertLessEqual(section + 40, header_size)
-            raw = (len(data) + alignment - 1) // alignment * alignment
+            header_size = struct.unpack_from("<I", data, pe + 84)[0]
+            self.assertLessEqual(section + 80, header_size)
+            raw = (len(data) + 4095) & ~4095
             data.extend(b"\0" * (raw - len(data)))
-            rva, size = 0x200000, 0xA00000
-            payload = bytearray(size)
-            tables = windows_port.profile()
-            for sites in tables.values():
-                for at, expected, _ in sites:
-                    payload[at - rva : at - rva + len(expected)] = expected
-            data.extend(payload)
-            struct.pack_into(
-                "<8sIIIIIIHHI",
-                data,
-                section,
-                b".ddtest\0",
-                size,
-                rva,
-                size,
-                raw,
-                0,
-                0,
-                0,
-                0,
-                0x60000020,
-            )
-            struct.pack_into("<H", data, pe + 6, count + 1)
-            struct.pack_into("<I", data, pe + 80, rva + size)
-            flags = struct.unpack_from("<H", data, pe + 94)[0]
-            struct.pack_into("<H", data, pe + 94, flags & ~0x40)
+            for i, (name, rva, payload, flags) in enumerate(
+                [
+                    (b".ddcode", fixture.code_address, fixture.code, 0x60000020),
+                    (b".dddata", fixture.data_address, fixture.data, 0xC0000040),
+                ]
+            ):
+                size = (len(payload) + 4095) & ~4095
+                offset = len(data)
+                data.extend(payload)
+                data.extend(b"\0" * (size - len(payload)))
+                struct.pack_into(
+                    "<8sIIIIIIHHI",
+                    data,
+                    section + i * 40,
+                    name,
+                    size,
+                    rva,
+                    size,
+                    offset,
+                    0,
+                    0,
+                    0,
+                    0,
+                    flags,
+                )
+            struct.pack_into("<H", data, pe + 6, count + 2)
+            struct.pack_into("<I", data, pe + 80, fixture.data_address + 4096)
             executable.write_bytes(data)
             project = WINDOWS_NATIVE
             helper = root / "bootstrap.c"
@@ -421,7 +387,7 @@ int wmain(int argc, wchar_t **argv) {
                     marker.unlink()
                     candidate = bytearray(data)
                     if failure == "instruction":
-                        candidate[raw + tables["resource"][0][0] - rva] ^= 1
+                        candidate[raw + fixture.symbols["RESOURCE_0"] - fixture.code_address] ^= 1
                     elif failure == "library":
                         failed = root / "failed_library.c"
                         failed.write_text("""#include <windows.h>

@@ -8,7 +8,7 @@
 | 原生分辨率画布 | 让游戏画布跟随实际分辨率，包括 4K，保留原有逻辑布局 |
 | 动态骨架路由 | 按当前英雄皮肤的实际 Mod 来源查找骨架，区分不同来源的同名资源，无需预先生成路由表 |
 
-**当前为实验版本。** 读取扩容、动态骨架和 4K 画布已完成基础实机验证；当前自动加载分发流程和完整战斗回归仍待完成。
+**当前为实验版本。** 新版优先验证 Linux；Windows 动态定位迁移仍待后续验证。 读取扩容、动态骨架和 4K 画布已完成基础实机验证；当前自动加载分发流程和完整战斗回归仍待完成。
 
 ## 支持范围
 
@@ -17,9 +17,9 @@
 | Linux x86-64 | 原生 `_linux/darkest.bin.x86_64` | Steam 环境变量与 `LD_PRELOAD` |
 | Windows x64 | `_windows\win64\Darkest.exe` | 运行一次安装 EXE |
 
-补丁不检查游戏版本号，不使用游戏 EXE 哈希白名单。游戏更新后仍默认尝试加载；目标原指令匹配时继续使用现有补丁，不需要仅因版本变化重新安装。
+补丁不检查游戏版本号，不使用游戏 EXE 哈希白名单。游戏更新后仍默认尝试加载；运行时特征和接口结构仍兼容时继续使用现有补丁，不需要仅因版本变化重新安装。
 
-改写内存前会检查补丁点的原始指令。发现不匹配时记录原因并跳过：Linux 跳过对应功能，Windows 启动未修改的游戏；Windows 注入初始化失败也会回退到未修改的游戏。游戏更新若改变了代码位置或内部结构，仍可能需要修复适配，日志用于定位问题。
+启动时在可执行代码段内扫描带通配符的特征，动态定位改写位置、调用函数和回调；从相对寻址或地址操作数解析全局数据地址，再检查目标所在代码／数据段和补丁原指令。定位要求唯一匹配，不使用旧偏移兜底。找不到特征、出现多个匹配或指令不符时，记录原因并跳过：Linux 跳过对应功能，Windows 启动未修改的游戏；Windows 注入初始化失败也会回退到未修改的游戏。代码和数据地址移动、相对位移改变时可自动重新定位；Linux 的角色贴图指针字段也从原生访问指令提取，并核对两处引用一致。若更新改变了特征本身、对象字段布局或调用约定，仍需重新适配，不能保证所有未来更新自动兼容。
 
 补丁只修改运行中的进程内存，不修改磁盘上的游戏程序。Linux 需使用原生入口；Proton 不适用这套 Linux 配置。Windows 的 Steam 默认入口可以是 32 位，启动器会优先转到同一安装目录下的 x64 程序。
 
@@ -103,7 +103,7 @@ darkest_dungeon_patches/
    env DD_LOADBUFFER_PATCH=1 DD_NATIVE_RENDER=1 DD_RIG_RUNTIME=1 LD_PRELOAD=/home/user/.local/share/darkest_dungeon_patches/libdd_resource_loading_patch.so:/home/user/.local/share/darkest_dungeon_patches/libdd_skin_rig_patch.so %command%
    ```
 
-以后直接在 Steam 点击“开始游戏”。动态链接器加载 SO，SO 在修改内存前自行核对补丁点的原指令。三个开关分别控制读取扩容、原生分辨率画布和动态骨架路由。
+以后直接在 Steam 点击“开始游戏”。动态链接器加载 SO，SO 在修改内存前自行扫描特征、解析地址并核对原指令。三个开关分别控制读取扩容、原生分辨率画布和动态骨架路由。
 
 如需写入独立日志，在同一行的 `env` 后加入 `DD_PATCH_LOG=/home/user/.local/share/darkest_dungeon_patches/steam_launch.log`。日志按追加方式写入，该目录需存在且可写；未设置时日志输出到标准错误。
 
@@ -123,7 +123,7 @@ darkest_dungeon_patches/
 
 常见问题：
 
-- **游戏更新后补丁未生效**：查看日志中的 `SKIPPED` 或 `MISMATCH` 及对应地址。补丁不会仅因版本变化阻止启动；原指令不匹配时会跳过，提交日志以便适配。
+- **游戏更新后补丁未生效**：查看日志中的 `SIGNATURE_MISSING`、`SKIPPED` 或 `MISMATCH`，提供对应的 `feature` 和 `matches`；`matches=0` 表示未找到，`matches=2` 表示至少两处匹配。补丁不会仅因版本变化阻止启动；原指令不匹配时会跳过，提交日志以便适配。
 - **Linux 没有加载补丁**：检查两份 SO 的绝对路径和三个开关，确认 Steam 启动的是原生 x86-64 版本，且未使用 Proton。日志路径需可写。
 - **Windows 安装器提示 Steam 仍在运行**：正常退出客户端后重试。关闭 Steam 窗口不一定代表退出客户端。
 - **Windows 提示启动选项被修改**：当前配置与安装器记录不同，安装器会拒绝覆盖。请保留现有配置和安装日志后反馈。
@@ -146,7 +146,7 @@ darkest_dungeon_patches/
 src/
   darkest_dungeon_patches/  # Python 构建、配置与部署工具
   native/
-    common/                # 两平台共用的骨架路由
+    common/                # 特征扫描、地址解析和共用骨架路由
     linux/                 # Linux 原生补丁与加载逻辑
     windows/               # Windows 适配、注入器与安装器
 scripts/                   # 开发入口和安装器内置脚本
@@ -183,7 +183,7 @@ uv run --locked manage.py test
 
 Python 环境与开发依赖由 `pyproject.toml`、`uv.lock` 管理；`pnpm check` 同时执行 Ruff 风格检查、格式检查及 C 静态检查。
 
-`tests/` 只包含针对项目代码的单元测试和集成测试，数据、Steam 配置和可执行程序均为临时生成的测试替身，不读取已安装的游戏、存档或商业资源，也不需要手动观察画面。Windows 原生启动链的自有程序测试可按需提供 LLVM-MinGW 与 Wine；安装器集成检查在 Windows runner 上自动执行。
+`tests/` 只包含针对项目代码的单元测试和集成测试，数据、Steam 配置和可执行程序均为临时生成的测试替身，不读取已安装的游戏、存档或商业资源，也不需要手动观察画面。回归覆盖代码／数据地址独立移动、相对调用与数据引用、特征缺失／歧义，以及注入失败后的正常启动。Windows 原生启动链的自有程序测试可按需提供 LLVM-MinGW 与 Wine；安装器集成检查在 Windows runner 上自动执行。
 
 [GitHub Actions 工作流](.github/workflows/build_release.yml) 在 push、pull request 或手动运行时构建，执行离线检查和 Windows 安装器检查；`v*` 标签在检查通过后发布统一 ZIP。CI 通过不等于实际游戏场景验证。
 

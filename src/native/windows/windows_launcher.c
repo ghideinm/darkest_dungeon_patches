@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "windows_arguments.h"
+#include "windows_image.h"
 #include "windows_profile.h"
 #include <share.h>
 #include <stdarg.h>
@@ -46,84 +47,69 @@ static int read_pe(HANDLE file, IMAGE_DOS_HEADER *dos, IMAGE_NT_HEADERS64 *pe) {
          pe->FileHeader.NumberOfSections <= 32 &&
          pe->FileHeader.SizeOfOptionalHeader == sizeof(IMAGE_OPTIONAL_HEADER64);
 }
-static int verify_file_sites(HANDLE file, int runtime_rig, int native_render) {
-  IMAGE_DOS_HEADER dos;
-  IMAGE_NT_HEADERS64 pe;
-  LARGE_INTEGER file_size;
-  if (!GetFileSizeEx(file, &file_size) || !read_pe(file, &dos, &pe))
+static int resolve_image(const DdWindowsImage *image, int runtime_rig,
+                         int native_render, DdResolution *symbols) {
+  const DdSignature *failed = NULL;
+  int matches = 0;
+  unsigned groups = DD_GROUP_RESOURCE | (runtime_rig ? DD_GROUP_RIG : 0) |
+                    (native_render ? DD_GROUP_RENDER : 0);
+  if (!dd_resolve_profile(image->ranges, image->count, groups, symbols, &failed,
+                          &matches)) {
+    report("DD_WINDOWS_SIGNATURE_MISSING feature=%s matches=%d\n", failed->name,
+           matches);
     return 0;
-  IMAGE_SECTION_HEADER sections[32];
-  if (!read_at(file, (unsigned)dos.e_lfanew + sizeof(pe), sections,
-               pe.FileHeader.NumberOfSections * sizeof(sections[0])))
-    return 0;
+  }
   const WindowsSite *tables[] = {windows_resource_sites, windows_hook_sites,
                                  windows_api_sites, windows_render_sites};
-  size_t counts[] = {sizeof(windows_resource_sites) / sizeof(WindowsSite),
-                     sizeof(windows_hook_sites) / sizeof(WindowsSite),
-                     sizeof(windows_api_sites) / sizeof(WindowsSite),
-                     sizeof(windows_render_sites) / sizeof(WindowsSite)};
+  const size_t counts[] = {sizeof(windows_resource_sites) / sizeof(WindowsSite),
+                           sizeof(windows_hook_sites) / sizeof(WindowsSite),
+                           sizeof(windows_api_sites) / sizeof(WindowsSite),
+                           sizeof(windows_render_sites) / sizeof(WindowsSite)};
   for (size_t t = 0; t < 4; ++t)
     for (size_t i = 0; i < counts[t]; ++i) {
       if (((t == 1 || t == 2) && !runtime_rig) || (t == 3 && !native_render))
         continue;
       const WindowsSite *site = tables[t] + i;
-      int found = 0;
-      for (unsigned j = 0; j < pe.FileHeader.NumberOfSections; ++j) {
-        const IMAGE_SECTION_HEADER *section = sections + j;
-        if (!(section->Characteristics & IMAGE_SCN_MEM_EXECUTE) ||
-            site->rva < section->VirtualAddress)
-          continue;
-        uint64_t delta = site->rva - section->VirtualAddress;
-        uint64_t offset = section->PointerToRawData + delta;
-        unsigned char actual[16];
-        if (delta + site->length <= section->SizeOfRawData &&
-            offset + site->length <= (uint64_t)file_size.QuadPart &&
-            read_at(file, offset, actual, (DWORD)site->length) &&
-            !memcmp(actual, site->expected, site->length))
-          found = 1;
+      uintptr_t at = symbols->values[site->symbol];
+      const unsigned char *actual = NULL;
+      for (size_t r = 0; r < image->count; ++r) {
+        const DdRange *range = image->ranges + r;
+        if (at >= range->address && at - range->address <= range->size &&
+            site->length <= range->size - (at - range->address))
+          actual = range->bytes + (at - range->address);
       }
-      if (!found) {
-        report("DD_WINDOWS_FILE_MISMATCH rva=%x\n", site->rva);
+      if (!actual || !dd_guard(actual, site->expected, site->length, at,
+                               symbols->values[DD_NATIVE_NEW])) {
+        report("DD_WINDOWS_INSTRUCTION_MISMATCH symbol=%u rva=%llx\n",
+               (unsigned)site->symbol, (unsigned long long)at);
         return 0;
       }
     }
   return 1;
+}
+static int verify_file_sites(HANDLE file, int runtime_rig, int native_render,
+                             DdResolution *symbols) {
+  DdWindowsImage image = {0};
+  int result = dd_windows_file_image(file, &image) &&
+               resolve_image(&image, runtime_rig, native_render, symbols);
+  dd_windows_image_close(&image);
+  return result;
 }
 static int verify_remote(HANDLE process, uintptr_t base, int runtime_rig,
-                         int native_render) {
-  const WindowsSite *tables[] = {windows_resource_sites, windows_hook_sites,
-                                 windows_api_sites, windows_render_sites};
-  size_t counts[] = {sizeof(windows_resource_sites) / sizeof(WindowsSite),
-                     sizeof(windows_hook_sites) / sizeof(WindowsSite),
-                     sizeof(windows_api_sites) / sizeof(WindowsSite),
-                     sizeof(windows_render_sites) / sizeof(WindowsSite)};
-  for (size_t t = 0; t < 4; ++t)
-    for (size_t i = 0; i < counts[t]; ++i) {
-      if (((t == 1 || t == 2) && !runtime_rig) || (t == 3 && !native_render))
-        continue;
-      const WindowsSite *site = tables[t] + i;
-      unsigned char actual[16];
-      SIZE_T read;
-      MEMORY_BASIC_INFORMATION region;
-      uintptr_t address = base + site->rva;
-      if (!VirtualQueryEx(process, (void *)address, &region, sizeof(region)) ||
-          region.State != MEM_COMMIT || region.Type != MEM_IMAGE ||
-          (region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
-          !ReadProcessMemory(process, (void *)address, actual, site->length,
-                             &read) ||
-          read != site->length ||
-          memcmp(actual, site->expected, site->length)) {
-        report("DD_WINDOWS_MEMORY_REFUSED rva=%x\n", site->rva);
-        return 0;
-      }
-    }
-  return 1;
+                         int native_render, DdResolution *symbols) {
+  DdWindowsImage image = {0};
+  int result = dd_windows_remote_image(process, base, &image) &&
+               resolve_image(&image, runtime_rig, native_render, symbols);
+  dd_windows_image_close(&image);
+  return result;
 }
-static int patch_resources(HANDLE process, uintptr_t base) {
+static int patch_resources(HANDLE process, uintptr_t base,
+                           const DdResolution *symbols) {
   for (size_t i = 0; i < sizeof(windows_resource_sites) / sizeof(WindowsSite);
        ++i) {
     const WindowsSite *site = windows_resource_sites + i;
-    void *address = (void *)(base + site->rva + site->operand);
+    void *address =
+        (void *)(base + symbols->values[site->symbol] + site->operand);
     DWORD previous, ignored;
     SIZE_T written;
     const uint32_t cap = DD_WINDOWS_NEW_CAP;
@@ -187,11 +173,12 @@ static int entry_breakpoint(HANDLE process, const EntryBreakpoint *entry,
     valid = 0;
   return valid;
 }
-static int patch_render(HANDLE process, uintptr_t image) {
+static int patch_render(HANDLE process, uintptr_t image,
+                        const DdResolution *symbols) {
   for (size_t i = 0; i < sizeof(windows_render_sites) / sizeof(WindowsSite);
        ++i) {
     const WindowsSite *site = windows_render_sites + i;
-    void *address = (void *)(image + site->rva);
+    void *address = (void *)(image + symbols->values[site->symbol]);
     DWORD previous, ignored;
     SIZE_T written;
     if (!VirtualProtectEx(process, address, site->length,
@@ -301,6 +288,7 @@ static int launch_game(const wchar_t *game, wchar_t *command,
   ULONGLONG deadline = GetTickCount64() + 45000;
   uintptr_t image = 0;
   EntryBreakpoint entry = {0};
+  DdResolution symbols = {0};
   int initialized = 0, success = 0, held = 0, suspended = 0, armed = 0;
   DEBUG_EVENT event = {0};
   DWORD remote_thread_id = 0;
@@ -345,10 +333,11 @@ static int launch_game(const wchar_t *game, wchar_t *command,
           break;
         context.Rip = entry.address;
         if (!SetThreadContext(process.hThread, &context) ||
-            !verify_remote(process.hProcess, image, runtime_rig,
-                           native_render) ||
-            !patch_resources(process.hProcess, image) ||
-            (native_render && !patch_render(process.hProcess, image)) ||
+            !verify_remote(process.hProcess, image, runtime_rig, native_render,
+                           &symbols) ||
+            !patch_resources(process.hProcess, image, &symbols) ||
+            (native_render &&
+             !patch_render(process.hProcess, image, &symbols)) ||
             SuspendThread(process.hThread) == (DWORD)-1)
           break;
         suspended = initialized = 1;
@@ -528,8 +517,9 @@ int wmain(int argc, wchar_t **argv) {
   IMAGE_DOS_HEADER dos;
   IMAGE_NT_HEADERS64 pe;
   int readable = file != INVALID_HANDLE_VALUE && read_pe(file, &dos, &pe);
+  DdResolution symbols = {0};
   int compatible =
-      readable && verify_file_sites(file, runtime_rig, native_render);
+      readable && verify_file_sites(file, runtime_rig, native_render, &symbols);
   if (file != INVALID_HANDLE_VALUE)
     CloseHandle(file);
   if (!compatible)

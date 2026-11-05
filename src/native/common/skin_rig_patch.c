@@ -16,24 +16,21 @@
 #define WIN32_LEAN_AND_MEAN
 #include <stdarg.h>
 #include <windows.h>
-#define DD_STORAGE_ADDRESS 0x1174ac8
-#define DD_RESOURCE_ADDRESS 0x117d858
-#define DD_ACTOR_SPRITE_OFFSET 0x1050
 #define DD_CLASS_VTABLE_OFFSET 0x30
 #define DD_FUNCTION_WORDS 8
 static int windows_log(int descriptor, const char *format, ...);
 #define dprintf windows_log
 #else
+#include "../linux/linux_patch.h"
 #include "../linux/linux_runtime.h"
 #include <dlfcn.h>
 #include <link.h>
 #include <sys/mman.h>
-#define DD_STORAGE_ADDRESS 0x1d744f0
-#define DD_RESOURCE_ADDRESS 0x31c2b58
-#define DD_ACTOR_SPRITE_OFFSET 0x1070
 #define DD_CLASS_VTABLE_OFFSET 0x38
 #define DD_FUNCTION_WORDS 4
 #endif
+
+#include "address_profile.h"
 
 /* Original instructions are checked before native hooks run. */
 typedef struct {
@@ -347,6 +344,19 @@ static int read_routes(FILE *file) {
 
 #ifndef DD_PATCH_SELFTEST
 static uintptr_t base;
+static DdResolution native_symbols;
+#define DD_ACTOR_SPRITE_OFFSET (native_symbols.values[DD_ACTOR_SPRITE_FIELD])
+static int native_fields_valid(void) {
+  if (native_symbols.values[DD_ACTOR_SPRITE_FIELD] !=
+      native_symbols.values[DD_ACTOR_SPRITE_VERIFY]) {
+    dprintf(2, "DD_RIG_PATCH_SKIPPED reason=actor_sprite_field_mismatch\n");
+    return 0;
+  }
+  return 1;
+}
+static uintptr_t native_address(DdSymbol symbol) {
+  return base + native_symbols.values[symbol];
+}
 static void (*original_colour)(void *, int);
 static void (*original_preview)(void *, void *);
 static void (*original_override)(void *, const char *);
@@ -403,7 +413,7 @@ static SkinCatalog catalogs[128];
 static size_t catalog_count;
 
 static void *data_device(void) {
-  void *storage = *(void **)(base + DD_STORAGE_ADDRESS);
+  void *storage = *(void **)(native_address(DD_STORAGE));
 #ifdef _WIN32
   return storage ? pointer_at(storage, 0x18) : NULL;
 #else
@@ -660,7 +670,7 @@ static const Route *runtime_route(const char *skin, const char *origin) {
   }
   ptrdiff_t count = files.begin ? files.end - files.begin : 0;
   valid = valid && count > 0 && count <= 4096;
-  void *storage = *(void **)(base + DD_STORAGE_ADDRESS);
+  void *storage = *(void **)(native_address(DD_STORAGE));
   for (ptrdiff_t i = 0; valid && i < count; ++i) {
     char request[512], actual[512] = {0};
     RigPlan candidates = {0};
@@ -765,7 +775,7 @@ static const Route *find_route(void *actor, int colour) {
   return NULL;
 }
 static const Route *resource_route(const Handle *handle, const Route *scope) {
-  void *manager = *(void **)(base + DD_RESOURCE_ADDRESS);
+  void *manager = *(void **)(native_address(DD_RESOURCE));
   const char *name = resource_name(manager, handle);
   return route_for_name(name, scope);
 }
@@ -788,7 +798,7 @@ static void *make_sprite(void *klass, const Route *route) {
   Handle selected[256];
   if (route->plan) {
     size_t count = route->plan->count, loaded = 0;
-    void *manager = *(void **)(base + DD_RESOURCE_ADDRESS);
+    void *manager = *(void **)(native_address(DD_RESOURCE));
     const uint64_t empty_callback[DD_FUNCTION_WORDS]
         __attribute__((aligned(16))) = {0};
     int valid = 1;
@@ -833,7 +843,7 @@ static int sprite_matches(void *sprite, const Route *route) {
     if (end < begin || (end - begin) % 0x30 ||
         (end - begin) / 0x30 != route->plan->count)
       return 0;
-    void *manager = *(void **)(base + DD_RESOURCE_ADDRESS);
+    void *manager = *(void **)(native_address(DD_RESOURCE));
     for (size_t i = 0; i < route->plan->count; ++i) {
       const Handle *handle = (const void *)(begin + i * 0x30);
       const char *name = resource_name(manager, handle);
@@ -923,6 +933,9 @@ void dd_runtime_test_bind(
     void *(*create)(const Handles *, int),
     const char *(*name)(void *, const Handle *)) {
   base = image_base;
+  /* Addresses inside the synthetic memory owned by this test adapter. */
+  native_symbols.values[DD_STORAGE] = 0x1d744f0;
+  native_symbols.values[DD_RESOURCE] = 0x31c2b58;
   for (size_t i = 0; i < route_count; ++i)
     free(routes[i].plan);
   route_count = 0;
@@ -983,20 +996,21 @@ const char *dd_runtime_test_source(void *klass, unsigned index) {
 #include "skin_rig_windows.h"
 #else
 static void discard_sprite(void *sprite) {
-  void (*destroy)(void **) = (void *)(base + 0xa6f170);
+  void (*destroy)(void **) = (void *)(native_address(DD_DISCARD_SPRITE));
   destroy(&sprite); /* native deferred deletion, not a foreign free */
 }
 static const char *animation_name(void *sprite) {
   if (!sprite || !pointer_at(sprite, 0))
     return "";
-  const char *(*name)(void *) = (void *)(base + 0xa70690);
+  const char *(*name)(void *) = (void *)(native_address(DD_ANIMATION_NAME));
   return name(sprite);
 }
 static void start_animation(void *sprite, const char *name, float time) {
   set_animation(sprite, name && *name ? name : "idle", 1, 1);
-  float (*length)(void *, const char *) = (void *)(base + 0xa706a0);
+  float (*length)(void *, const char *) =
+      (void *)(native_address(DD_ANIMATION_LENGTH));
   float seconds = length(sprite, name && *name ? name : "idle");
-  void (*set_time)(void *, float) = (void *)(base + 0xa704c0);
+  void (*set_time)(void *, float) = (void *)(native_address(DD_SET_TIME));
   if (isfinite(time) && time >= 0 && seconds > 0)
     set_time(sprite, fmodf(time, seconds));
 }
@@ -1083,26 +1097,29 @@ static void change_colour(void *actor, int colour) {
             actor, name, callbacks_empty);
     return; /* keep both old skin and old rig; do not mix incompatible data */
   }
-  float (*get_time)(void *) = (void *)(base + 0xa70490);
+  float (*get_time)(void *) = (void *)(native_address(DD_GET_TIME));
   float time = name[0] ? get_time(old) : 0;
   void *sprite = make_sprite(actor_class(actor), route);
   if (!sprite)
     return;
-  bool (*has_animation)(void *, const char *) = (void *)(base + 0xa70a60);
+  bool (*has_animation)(void *, const char *) =
+      (void *)(native_address(DD_HAS_ANIMATION));
   if (!has_animation(sprite, name[0] ? name : "idle")) {
     discard_sprite(sprite);
     dprintf(2, "DD_RIG_SKIN_REFUSED_ANIMATION actor=%p animation=%s\n", actor,
             name);
     return;
   }
-  void (*set_sprite)(void *, void *) = (void *)(base + 0xd660c0);
+  void (*set_sprite)(void *, void *) = (void *)(native_address(DD_SET_SPRITE));
   set_sprite(actor, sprite);
   /* Exactly the same captured-Hero step callback constructed by
    * Hero::LoadAssetsInternal. */
   uint64_t callback[4] __attribute__((aligned(16))) = {
-      (uintptr_t)actor, 0, base + 0xf00060, base + 0xf00050};
-  void (*add_step)(void *, unsigned, void *) = (void *)(base + 0xa70ce0);
-  add_step(sprite, *(unsigned *)(base + 0x37be400), callback);
+      (uintptr_t)actor, 0, native_address(DD_CALLBACK_MANAGER),
+      native_address(DD_CALLBACK_INVOKER)};
+  void (*add_step)(void *, unsigned, void *) =
+      (void *)(native_address(DD_ADD_STEP));
+  add_step(sprite, *(unsigned *)(native_address(DD_STEP_ID)), callback);
   apply_colour(actor, colour, route);
   start_animation(sprite, name, time);
   discard_sprite(old);
@@ -1118,7 +1135,7 @@ static void change_preview(void *panel, void *actor) {
     apply_preview(panel, actor, route);
     return;
   }
-  void *(*assets)(void) = (void *)(base + 0x1170d60);
+  void *(*assets)(void) = (void *)(native_address(DD_ASSETS));
   void *campaign = assets(), *klass = actor_class(actor);
   if (!campaign) {
     apply_preview(panel, actor, route);
@@ -1152,29 +1169,6 @@ static void change_preview(void *panel, void *actor) {
   apply_preview(panel, actor, route);
 }
 
-static const ElfW(Phdr) * main_phdr;
-static size_t main_phnum;
-static int main_image(struct dl_phdr_info *info, size_t size, void *unused) {
-  (void)size;
-  (void)unused;
-  if (info->dlpi_name && *info->dlpi_name)
-    return 0;
-  base = info->dlpi_addr;
-  main_phdr = info->dlpi_phdr;
-  main_phnum = info->dlpi_phnum;
-  return 1;
-}
-static int contains_code(uintptr_t address, size_t length) {
-  for (size_t i = 0; i < main_phnum; ++i) {
-    const ElfW(Phdr) *p = main_phdr + i;
-    uintptr_t start = base + p->p_vaddr;
-    if (p->p_type == PT_LOAD && (p->p_flags & PF_X) && address >= start &&
-        address - start <= p->p_memsz &&
-        length <= p->p_memsz - (address - start))
-      return 1;
-  }
-  return 0;
-}
 static void jump_absolute(unsigned char *out, void *destination) {
   out[0] = 0x48;
   out[1] = 0xb8;
@@ -1183,14 +1177,11 @@ static void jump_absolute(unsigned char *out, void *destination) {
   out[10] = 0xff;
   out[11] = 0xe0;
 }
-static void install_jump(uintptr_t site, void *stub) {
-  int64_t delta = (uintptr_t)stub - (site + 5);
-  if (delta < INT32_MIN || delta > INT32_MAX)
-    _exit(125);
-  unsigned char *p = (void *)site;
-  p[0] = 0xe9;
+static void encode_jump(unsigned char *out, uintptr_t site, void *stub) {
+  int64_t delta = (int64_t)(uintptr_t)stub - (int64_t)(site + 5);
+  out[0] = 0xe9;
   int32_t offset = (int32_t)delta;
-  memcpy(p + 1, &offset, 4);
+  memcpy(out + 1, &offset, 4);
 }
 __attribute__((constructor)) static void init(void) {
   const char *map = getenv("DD_RIG_MAP");
@@ -1207,10 +1198,24 @@ __attribute__((constructor)) static void init(void) {
   if (!name || strcmp(name + 1, "darkest.bin.x86_64"))
     return;
   dd_linux_log();
-  if (!dl_iterate_phdr(main_image, NULL)) {
+  DdLinuxImage image = {0};
+  if (!dd_linux_image(&image)) {
     dprintf(2, "DD_RIG_PATCH_SKIPPED reason=main_image\n");
     return;
   }
+  base = image.base;
+  const DdSignature *failed = NULL;
+  int matches = 0;
+  if (!dd_resolve_profile(image.ranges, image.count, DD_GROUP_RIG,
+                          &native_symbols, &failed, &matches)) {
+    dprintf(2, "DD_RIG_PATCH_SKIPPED feature=%s matches=%d\n", failed->name,
+            matches);
+    return;
+  }
+  if (!native_fields_valid())
+    return;
+  dprintf(2, "DD_RIG_LAYOUT_RESOLVED actor_sprite_offset=%zx\n",
+          (size_t)DD_ACTOR_SPRITE_OFFSET);
   if (!runtime_enabled) {
     if (!map || !*map)
       return;
@@ -1226,8 +1231,9 @@ __attribute__((constructor)) static void init(void) {
       return;
     }
   }
-  uintptr_t sites[4] = {base + 0xefc214, base + 0xd66e80, base + 0x11a8400,
-                        base + 0xa70e10};
+  uintptr_t sites[4] = {
+      native_address(DD_HOOK_NEW), native_address(DD_HOOK_COLOUR),
+      native_address(DD_HOOK_PREVIEW), native_address(DD_HOOK_TEXTURE)};
   const unsigned char expected[4][10] = {
       {0xe8, 0xf7, 0x2e, 0xb7, 0xff},
       {0x41, 0x57, 0x41, 0x56, 0x53},
@@ -1236,37 +1242,13 @@ __attribute__((constructor)) static void init(void) {
   size_t lengths[4] = {5, 5, 10, 5};
   size_t site_count = runtime_enabled ? 4 : 3;
   for (size_t i = 0; i < site_count; ++i)
-    if (!contains_code(sites[i], lengths[i]) ||
-        memcmp((void *)sites[i], expected[i], lengths[i])) {
+    if (!dd_contains(image.ranges, image.count, sites[i] - base, lengths[i],
+                     DD_CODE) ||
+        !dd_guard((void *)sites[i], expected[i], lengths[i], sites[i],
+                  native_address(DD_NATIVE_NEW))) {
       dprintf(2, "DD_RIG_PATCH_SKIPPED site=%zx\n", sites[i]);
       return;
     }
-  if (runtime_enabled) {
-    const struct {
-      uintptr_t address;
-      const char *expected;
-      size_t length;
-    } api[] = {{0xa5a7d0, "\x55\x53\x48\x81\xec\x48\x04\x00\x00", 9},
-               {0xc27c90, "\x55\x41\x57\x41\x56\x41\x55\x41\x54\x53", 10},
-               {0xc27d90, "\x48\x89\xf8\x48\x8b\x3f\x48\x85\xff", 9},
-               {0xc3a260, "\x41\x57\x41\x56\x41\x54\x53", 7},
-               {0xa63a60, "\x83\x3f\x00\x78\x38", 5},
-               {0xc3f3f0, "\x41\x56\x53\x50\x48\x63\x06", 7},
-               {0xa70a60, "\x55\x41\x57\x41\x56\x41\x55\x41\x54\x53\x50", 11},
-               {0xc27c30, "\x41\x56\x53\x50", 4},
-               {0xa40930, "\x48\x8b\x47\x10\x48\x2b\x47\x08", 8},
-               {0xa40950, "\x89\xf1\x48\x8b\x47\x08", 6},
-               {0xa41700, "\x55\x41\x57\x41\x56\x41\x55\x41\x54\x53", 10},
-               {0xd7b130, "\x48\x8b\x87\x08\x06\x00\x00", 7},
-               {0xd7b150, "\x89\xf0\x48\xc1\xe0\x09", 6}};
-    for (size_t i = 0; i < sizeof(api) / sizeof(*api); ++i)
-      if (!contains_code(base + api[i].address, api[i].length) ||
-          memcmp((void *)(base + api[i].address), api[i].expected,
-                 api[i].length)) {
-        dprintf(2, "DD_RIG_API_SKIPPED site=%zx\n", api[i].address);
-        return;
-      }
-  }
   unsigned char *stubs = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
   if (stubs == MAP_FAILED) {
@@ -1300,58 +1282,43 @@ __attribute__((constructor)) static void init(void) {
   }
   original_colour = (void *)(stubs + 64);
   original_preview = (void *)(stubs + 128);
-  native_new = (void *)(base + 0xa6f110);
-  resource_name = (void *)(base + 0xc3e910);
-  set_animation = (void *)(base + 0xa6f2f0);
-  match_files = (void *)(base + 0xc27c90);
-  destroy_match = (void *)(base + 0xc27d90);
-  colour_count = (void *)(base + 0xd7b130);
-  colour_path = (void *)(base + 0xd7b150);
-  match_device = (void *)(base + 0xc27c30);
-  alternate_count = (void *)(base + 0xa40930);
-  alternate_root = (void *)(base + 0xa40950);
-  match_archive = (void *)(base + 0xa41700);
-  full_path = (void *)(base + 0xa5a7d0);
-  load_spine = (void *)(base + 0xc3a260);
-  release_spine = (void *)(base + 0xa63a60);
-  get_resource = (void *)(base + 0xc3f3f0);
+  native_new = (void *)(native_address(DD_NATIVE_NEW));
+  resource_name = (void *)(native_address(DD_RESOURCE_NAME));
+  set_animation = (void *)(native_address(DD_SET_ANIMATION));
+  match_files = (void *)(native_address(DD_MATCH_FILES));
+  destroy_match = (void *)(native_address(DD_DESTROY_MATCH));
+  colour_count = (void *)(native_address(DD_COLOUR_COUNT));
+  colour_path = (void *)(native_address(DD_COLOUR_PATH));
+  match_device = (void *)(native_address(DD_MATCH_DEVICE));
+  alternate_count = (void *)(native_address(DD_ALT_COUNT));
+  alternate_root = (void *)(native_address(DD_ALT_ROOT));
+  match_archive = (void *)(native_address(DD_MATCH_ARCHIVE));
+  full_path = (void *)(native_address(DD_FULL_PATH));
+  load_spine = (void *)(native_address(DD_LOAD_SPINE));
+  release_spine = (void *)(native_address(DD_RELEASE_SPINE));
+  get_resource = (void *)(native_address(DD_GET_RESOURCE));
   if (mprotect(stubs, 4096, PROT_READ | PROT_EXEC)) {
     dprintf(2, "DD_RIG_PATCH_SKIPPED reason=stub_protection\n");
     munmap(stubs, 4096);
     return;
   }
-  long page_size = sysconf(_SC_PAGESIZE);
-  if (page_size < 16 || (page_size & (page_size - 1))) {
-    dprintf(2, "DD_RIG_PATCH_SKIPPED reason=page_size\n");
+  unsigned char originals[4][10], replacements[4][10];
+  DdMemoryPatch patches[4];
+  for (size_t i = 0; i < site_count; ++i) {
+    memcpy(originals[i], (void *)sites[i], lengths[i]);
+    memcpy(replacements[i], originals[i], lengths[i]);
+    encode_jump(replacements[i], sites[i], stubs + stub_offsets[i]);
+    if (!i)
+      replacements[i][0] = 0xe8;
+    patches[i] =
+        (DdMemoryPatch){sites[i], lengths[i], originals[i], replacements[i]};
+  }
+  int patch_result = dd_linux_patch(&image, patches, site_count);
+  if (patch_result) {
+    dprintf(2, "DD_RIG_PATCH_SKIPPED reason=write_preparation code=%d\n",
+            patch_result);
     munmap(stubs, 4096);
     return;
-  }
-  uintptr_t pages[4];
-  for (size_t i = 0; i < site_count; ++i) {
-    pages[i] = sites[i] & ~((uintptr_t)page_size - 1);
-    if (sites[i] + lengths[i] > pages[i] + (uintptr_t)page_size ||
-        mprotect((void *)pages[i], (size_t)page_size, PROT_READ | PROT_WRITE)) {
-      for (size_t j = 0; j < i; ++j)
-        if (mprotect((void *)pages[j], (size_t)page_size,
-                     PROT_READ | PROT_EXEC))
-          _exit(125);
-      dprintf(2, "DD_RIG_PATCH_SKIPPED reason=code_protection\n");
-      munmap(stubs, 4096);
-      return;
-    }
-  }
-  install_jump(
-      sites[0],
-      stubs); /* CALL must stay CALL, keeping the native return address. */
-  *(unsigned char *)sites[0] = 0xe8;
-  install_jump(sites[1], stubs + 96);
-  install_jump(sites[2], stubs + 160);
-  if (runtime_enabled)
-    install_jump(sites[3], stubs + 224);
-  for (size_t i = 0; i < site_count; ++i) {
-    __builtin___clear_cache((char *)pages[i], (char *)(pages[i] + page_size));
-    if (mprotect((void *)pages[i], (size_t)page_size, PROT_READ | PROT_EXEC))
-      _exit(125);
   }
   dprintf(2,
           "DD_RIG_PATCH_APPLIED mode=%s routes=%zu body=instance "

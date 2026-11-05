@@ -1,5 +1,6 @@
 """Code-only compatibility checks using generated ELF files and programs."""
 
+import hashlib
 import os
 import struct
 import subprocess
@@ -7,36 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from darkest_dungeon_patches import linux_port
 from darkest_dungeon_patches.paths import COMMON_NATIVE, LINUX_NATIVE
-
-
-class LinuxCompatibilityTest(unittest.TestCase):
-    def test_changes_outside_patch_sites_are_allowed(self):
-        with tempfile.TemporaryDirectory(prefix="dd-elf-fixture-") as directory:
-            path = Path(directory) / "fixture"
-            data = bytearray(128 + max(linux_port.SITES) + 5)
-            data[:6] = b"\x7fELF\x02\x01"
-            struct.pack_into("<H", data, 18, 62)
-            struct.pack_into("<Q", data, 32, 64)
-            struct.pack_into("<HH", data, 54, 56, 1)
-            struct.pack_into(
-                "<IIQQQQQQ", data, 64, 1, 5, 128, 0, 0, len(data) - 128, len(data) - 128, 4096
-            )
-            for i, address in enumerate(linux_port.SITES):
-                data[128 + address : 128 + address + 5] = bytes(
-                    [0xB9 if i == 6 else 0xBF, 0, 0, 0x60, 0]
-                )
-            path.write_bytes(data)
-            self.assertTrue(linux_port.validate(path)["compatible"])
-            data[120] ^= 1
-            path.write_bytes(data)
-            self.assertTrue(linux_port.validate(path)["compatible"])
-            data[128 + linux_port.SITES[0]] ^= 1
-            path.write_bytes(data)
-            result = linux_port.validate(path)
-            self.assertFalse(result["compatible"])
-            self.assertIn("instruction", result["compatibility_issues"][0])
 
 
 class PreloadCompatibilityTest(unittest.TestCase):
@@ -105,4 +77,137 @@ class PreloadCompatibilityTest(unittest.TestCase):
                 "DD_RIG_PATCH_SKIPPED",
             ):
                 self.assertIn(message, log.read_text())
-            self.assertFalse(linux_port.validate(binary)["compatible"])
+
+    def test_preload_follows_relocated_code_and_data(self):
+        from address_fixtures import make_fixture
+
+        with tempfile.TemporaryDirectory(prefix="dd-moved-elf-") as directory:
+            root = Path(directory)
+            libraries = [root / "resource.so", root / "rig.so"]
+            common = ["clang", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"]
+            previous_header = None
+            for index, (code, data) in enumerate(((0x800000, 0x900000), (0x1400000, 0x1900000))):
+                fixture = make_fixture(
+                    root, "linux", code, data, actor_offset=0x1070 if index == 0 else 0x10E0
+                )
+                if previous_header is None:
+                    previous_header = fixture.header.read_bytes()
+                    for source, library in zip(
+                        [
+                            LINUX_NATIVE / "resource_loading_patch.c",
+                            COMMON_NATIVE / "skin_rig_patch.c",
+                        ],
+                        libraries,
+                    ):
+                        subprocess.run(
+                            [
+                                *common,
+                                '-DDD_ADDRESS_TEST_PROFILE="' + str(fixture.header) + '"',
+                                "-fPIC",
+                                "-shared",
+                                str(source),
+                                "-ldl",
+                                "-lm",
+                                "-o",
+                                str(library),
+                            ],
+                            check=True,
+                        )
+                else:
+                    self.assertEqual(previous_header, fixture.header.read_bytes())
+                work = root / str(index)
+                work.mkdir()
+                (work / "code.bin").write_bytes(fixture.code)
+                (work / "data.bin").write_bytes(fixture.data)
+                assembly = work / "sections.s"
+                assembly.write_text(
+                    '.section .ddsig,"ax",@progbits\n.incbin "'
+                    + str(work / "code.bin")
+                    + '"\n.section .dddata,"aw",@progbits\n.incbin "'
+                    + str(work / "data.bin")
+                    + '"\n.section .note.GNU-stack,"",@progbits\n'
+                )
+                source = work / "main.c"
+                source.write_text(
+                    "#include <stdio.h>\n#include <stdint.h>\nint main(void){\n"
+                    + "".join(
+                        "if(*(const uint32_t *)(uintptr_t)"
+                        + str(fixture.symbols[f"RESOURCE_{i}"] + 1)
+                        + " != 0x2000000) return 2;\n"
+                        for i in range(7)
+                    )
+                    + "".join(
+                        "if(*(const unsigned char *)(uintptr_t)"
+                        + str(fixture.symbols[name])
+                        + " != 0xe9) return 3;\n"
+                        for name in ("HOOK_COLOUR", "HOOK_PREVIEW", "HOOK_TEXTURE")
+                    )
+                    + 'puts("MOVED_FIXTURE_MAIN");return 0;}\n'
+                )
+                binary = work / "darkest.bin.x86_64"
+                subprocess.run(
+                    [
+                        *common,
+                        "-fno-pie",
+                        "-no-pie",
+                        str(source),
+                        str(assembly),
+                        f"-Wl,--section-start=.ddsig={code:#x}",
+                        f"-Wl,--section-start=.dddata={data:#x}",
+                        "-o",
+                        str(binary),
+                    ],
+                    check=True,
+                )
+                result = subprocess.run(
+                    [str(binary)],
+                    capture_output=True,
+                    text=True,
+                    env=dict(
+                        os.environ,
+                        LD_PRELOAD=":".join(map(str, libraries)),
+                        DD_RIG_RUNTIME="1",
+                        DD_NATIVE_RENDER="1",
+                        DD_LOADBUFFER_PATCH="1",
+                        DD_PATCH_LOG="",
+                    ),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("MOVED_FIXTURE_MAIN", result.stdout)
+                self.assertIn(
+                    "actor_sprite_offset=" + format(fixture.symbols["ACTOR_SPRITE_FIELD"], "x"),
+                    result.stderr,
+                )
+                for message in (
+                    "DD_LOADBUFFER_PATCH_APPLIED",
+                    "DD_NATIVE_RENDER_PATCH_APPLIED",
+                    "DD_RIG_PATCH_APPLIED",
+                ):
+                    self.assertIn(message, result.stderr)
+
+                if index == 1:
+                    # Mismatched independently extracted offsets must leave
+                    # all rig hooks untouched, while our own main still runs.
+                    marker = hashlib.blake2s(
+                        b"dd fixture ACTOR_SPRITE_VERIFY", digest_size=16
+                    ).digest()
+                    raw = bytearray(binary.read_bytes())
+                    capture = raw.index(marker) - 4
+                    struct.pack_into("<I", raw, capture, 0x1100)
+                    binary.write_bytes(raw)
+                    mismatch = subprocess.run(
+                        [str(binary)],
+                        capture_output=True,
+                        text=True,
+                        env=dict(
+                            os.environ,
+                            LD_PRELOAD=":".join(map(str, libraries)),
+                            DD_RIG_RUNTIME="1",
+                            DD_NATIVE_RENDER="1",
+                            DD_LOADBUFFER_PATCH="1",
+                            DD_PATCH_LOG="",
+                        ),
+                    )
+                    self.assertEqual(mismatch.returncode, 3, mismatch.stderr)
+                    self.assertIn("actor_sprite_field_mismatch", mismatch.stderr)
+                    self.assertNotIn("DD_RIG_PATCH_APPLIED", mismatch.stderr)

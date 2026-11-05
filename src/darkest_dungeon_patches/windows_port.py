@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 import shutil
-import struct
 import subprocess
 import tempfile
 from pathlib import Path
 
+from .address_scan import check_instructions, read_image, resolve, signatures
 from .paths import COMMON_NATIVE, WINDOWS_NATIVE, WINDOWS_SCRIPTS
 
 HERE = WINDOWS_NATIVE
@@ -23,12 +23,12 @@ def profile():
             raise ValueError("Windows instruction table is incomplete")
         entries = []
         for rva, length, operand, raw in re.findall(
-            r"\{\s*(0x[0-9a-f]+),\s*(\d+),\s*(\d+),\s*\{([^}]+)\}\}", match[1], re.S
+            r"\{\s*DD_(\w+),\s*(\d+),\s*(\d+),\s*\{([^}]+)\}\}", match[1], re.S
         ):
             expected = bytes(int(value.strip(), 16) for value in raw.split(","))
             if len(expected) != int(length):
                 raise ValueError("Windows instruction length is inconsistent")
-            entries.append((int(rva, 16), expected, int(operand)))
+            entries.append((rva, expected, int(operand)))
         if not entries:
             raise ValueError("Windows instruction table is empty")
         tables[name] = entries
@@ -36,48 +36,16 @@ def profile():
 
 
 def validate(game: Path):
-    data = Path(game).read_bytes()
     tables = profile()
-    if data[:2] != b"MZ" or len(data) < 64:
-        raise ValueError("Invalid Windows DOS header")
-    pe = struct.unpack_from("<I", data, 0x3C)[0]
-    if pe < 64 or pe + 264 > len(data) or data[pe : pe + 4] != b"PE\0\0":
-        raise ValueError("Invalid Windows PE header")
-    machine, count = struct.unpack_from("<HH", data, pe + 4)
-    optional_size = struct.unpack_from("<H", data, pe + 20)[0]
-    if (
-        machine != 0x8664
-        or not 0 < count <= 32
-        or optional_size != 240
-        or struct.unpack_from("<H", data, pe + 24)[0] != 0x20B
-    ):
-        raise ValueError("Unsupported Windows PE architecture or layout")
-    sections = []
-    for i in range(count):
-        position = pe + 24 + optional_size + i * 40
-        if position + 40 > len(data):
-            raise ValueError("Truncated Windows section table")
-        _, _, rva, size, offset, _, _, _, _, flags = struct.unpack_from(
-            "<8sIIIIIIHHI", data, position
-        )
-        if offset + size > len(data):
-            raise ValueError("Truncated Windows section")
-        if flags & 0x20000000:
-            sections.append((rva, rva + size, offset))
-    issues = []
-    for entries in tables.values():
-        for rva, expected, _ in entries:
-            section = next(
-                (s for s in sections if s[0] <= rva and rva + len(expected) <= s[1]), None
-            )
-            if section is None:
-                issues.append(f"Windows code section missing at {rva:x}")
-                continue
-            offset = section[2] + rva - section[0]
-            if data[offset : offset + len(expected)] != expected:
-                issues.append(f"Unexpected Windows instruction at {rva:x}")
+    ranges = read_image(Path(game), "windows")
+    resolved, issues = resolve(ranges, signatures("windows"))
+    issues += check_instructions(
+        ranges, resolved, [entry for rows in tables.values() for entry in rows]
+    )
     return {
         "compatible": not issues,
+        "address_resolution": "unique_signature",
+        "resolved_symbols": resolved,
         "compatibility_issues": issues,
         "platform": "windows_x64",
         "resource_buffers": 12,

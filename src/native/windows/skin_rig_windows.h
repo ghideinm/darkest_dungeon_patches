@@ -1,4 +1,5 @@
 /* Included by skin_rig_patch.c after the shared source resolver. */
+#include "windows_image.h"
 #include "windows_profile.h"
 
 static HANDLE windows_log_file = INVALID_HANDLE_VALUE;
@@ -60,8 +61,9 @@ static void windows_match_files(NativeFileMatch *files, int mount,
                        flags);
   unsigned count = windows_alternate_count(device);
   void (*find_root)(void *, NativeFileMatch *, void *, unsigned, const char *,
-                    const char *, int, int, int) = (void *)(base + 0x248070);
-  void *storage = *(void **)(base + DD_STORAGE_ADDRESS);
+                    const char *, int, int, int) =
+      (void *)(native_address(DD_FULL_PATH));
+  void *storage = *(void **)(native_address(DD_STORAGE));
   for (unsigned i = count; i-- > 0;)
     find_root(storage, files, device, i, directory, pattern, details, order,
               flags);
@@ -71,7 +73,7 @@ static bool windows_full_path(void *storage, int mount, const char *request,
   (void)mount;
   unsigned char info[0x448] = {0};
   void (*query)(void *, void *, const char *, void *) =
-      (void *)(base + 0x248740);
+      (void *)(native_address(DD_QUERY_FILE));
   query(storage, data_device(), request, info);
   if (!int_at(info, 0x440) || !memchr(info + 0x200, 0, 512))
     return false;
@@ -96,16 +98,18 @@ static const char *windows_resource_name(void *manager, const Handle *handle) {
   return entry + 0x10;
 }
 static void windows_release_spine(Handle *handle) {
-  void *manager = *(void **)(base + DD_RESOURCE_ADDRESS);
-  void (*release)(void *, Handle *) = (void *)(base + 0x380ee0);
+  void *manager = *(void **)(native_address(DD_RESOURCE));
+  void (*release)(void *, Handle *) =
+      (void *)(native_address(DD_RELEASE_SPINE));
   if (manager && handle->index >= 0 && handle->generation >= 0)
     release(manager, handle);
   *handle = (Handle){0, -1, NULL};
 }
 static void discard_sprite(void *sprite) {
   /* Native deferred deletion queue, also used by Hero::LoadAssetsInternal. */
-  void (*append)(void *, const void *) = (void *)(base + 0x257d90);
-  append((void *)(base + 0x2c1e8c8), &sprite);
+  void (*append)(void *, const void *) =
+      (void *)(native_address(DD_DISCARD_SPRITE));
+  append((void *)(native_address(DD_DEFERRED_LIST)), &sprite);
 }
 static const char *animation_name(void *sprite) {
   const void *animation = sprite ? pointer_at(sprite, 0) : NULL;
@@ -126,15 +130,17 @@ static float windows_animation_time(void *sprite) {
   return time;
 }
 static int windows_has_animation(void *sprite, const char *name) {
-  float (*length)(void *, const char *) = (void *)(base + 0x2579c0);
+  float (*length)(void *, const char *) =
+      (void *)(native_address(DD_ANIMATION_LENGTH));
   return length(sprite, name) > 0;
 }
 static void start_animation(void *sprite, const char *name, float time) {
   const char *chosen = name && *name ? name : "idle";
   set_animation(sprite, chosen, 1, 1);
-  float (*length)(void *, const char *) = (void *)(base + 0x2579c0);
+  float (*length)(void *, const char *) =
+      (void *)(native_address(DD_ANIMATION_LENGTH));
   float seconds = length(sprite, chosen);
-  void (*set_time)(void *, float) = (void *)(base + 0x2577b0);
+  void (*set_time)(void *, float) = (void *)(native_address(DD_SET_TIME));
   if (isfinite(time) && time >= 0 && seconds > 0)
     set_time(sprite, fmodf(time, seconds));
 }
@@ -201,7 +207,7 @@ static void change_preview(void *panel, void *actor) {
     apply_preview(panel, actor, route);
     return;
   }
-  void *head = *(void **)(base + 0x2bee908);
+  void *head = *(void **)(native_address(DD_PREVIEW_ROOT));
   void *node = head ? pointer_at(head, 8) : NULL;
   unsigned id = (unsigned)int_at(actor_class(actor), 0xd4);
   for (unsigned depth = 0; node && depth < 64; ++depth) {
@@ -254,15 +260,6 @@ static unsigned char *windows_near_page(void) {
 }
 static __attribute__((noinline)) int windows_patch_init(void) {
   base = (uintptr_t)GetModuleHandleW(NULL);
-  const IMAGE_DOS_HEADER *dos = (const void *)base;
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 64 ||
-      dos->e_lfanew > 4096)
-    return 0;
-  const IMAGE_NT_HEADERS64 *pe = (const void *)(base + (unsigned)dos->e_lfanew);
-  if (pe->Signature != IMAGE_NT_SIGNATURE ||
-      pe->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
-      pe->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
-    return 0;
   /* Thread-attach notifications can arrive on the game's 64 KiB worker
    * stacks. Never let this long-path buffer become a DllMain stack frame. */
   static wchar_t log_path[32768];
@@ -283,41 +280,43 @@ static __attribute__((noinline)) int windows_patch_init(void) {
     if (!valid)
       return 0;
   }
-  const WindowsSite *tables[] = {windows_hook_sites, windows_api_sites};
-  const size_t counts[] = {sizeof(windows_hook_sites) / sizeof(WindowsSite),
-                           sizeof(windows_api_sites) / sizeof(WindowsSite)};
-  for (size_t t = 0; t < 2; ++t)
-    for (size_t i = 0; i < counts[t]; ++i) {
-      const WindowsSite *site = tables[t] + i;
-      MEMORY_BASIC_INFORMATION region;
-      uintptr_t address = base + site->rva;
-      if (site->rva >= pe->OptionalHeader.SizeOfImage ||
-          site->length > pe->OptionalHeader.SizeOfImage - site->rva ||
-          !VirtualQuery((void *)address, &region, sizeof(region)) ||
-          region.AllocationBase != (void *)base || region.State != MEM_COMMIT ||
-          (region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
-          site->length >
-              region.RegionSize - (address - (uintptr_t)region.BaseAddress) ||
-          memcmp((void *)address, site->expected, site->length)) {
-        dprintf(2, "DD_RIG_PATCH_SKIPPED rva=%x\n", site->rva);
-        return 0;
-      }
-    }
-  native_new = (void *)(base + 0x256850);
+  DdWindowsImage image = {0};
+  const DdSignature *failed = NULL;
+  int matches = 0;
+  if (!dd_windows_loaded_image(base, &image) ||
+      !dd_resolve_profile(image.ranges, image.count, DD_GROUP_RIG,
+                          &native_symbols, &failed, &matches)) {
+    dprintf(2, "DD_RIG_PATCH_SKIPPED feature=%s matches=%d\n",
+            failed ? failed->name : "image_sections", matches);
+    return 0;
+  }
+  if (!native_fields_valid())
+    return 0;
+  for (size_t i = 0;
+       i < sizeof(windows_hook_sites) / sizeof(*windows_hook_sites); ++i) {
+    const WindowsSite *site = windows_hook_sites + i;
+    uintptr_t address = native_address(site->symbol);
+    if (!dd_contains(image.ranges, image.count, address - base, site->length,
+                     DD_CODE) ||
+        !dd_guard((void *)address, site->expected, site->length, address,
+                  native_address(DD_NATIVE_NEW)))
+      return 0;
+  }
+  native_new = (void *)(native_address(DD_NATIVE_NEW));
   resource_name = windows_resource_name;
-  set_animation = (void *)(base + 0x256930);
+  set_animation = (void *)(native_address(DD_SET_ANIMATION));
   match_files = windows_match_files;
   match_device = windows_match_device;
-  match_archive = (void *)(base + 0x239df0);
-  destroy_match = (void *)(base + 0x248df0);
+  match_archive = (void *)(native_address(DD_MATCH_ARCHIVE));
+  destroy_match = (void *)(native_address(DD_DESTROY_MATCH));
   colour_count = windows_colour_count;
   colour_path = windows_colour_path;
   alternate_count = windows_alternate_count;
   alternate_root = windows_alternate_root;
   full_path = windows_full_path;
-  load_spine = (void *)(base + 0x37e980);
+  load_spine = (void *)(native_address(DD_LOAD_SPINE));
   release_spine = windows_release_spine;
-  get_resource = (void *)(base + 0x382c90);
+  get_resource = (void *)(native_address(DD_GET_RESOURCE));
   unsigned char *stubs = windows_near_page();
   if (!stubs)
     return 0;
@@ -327,9 +326,11 @@ static __attribute__((noinline)) int windows_patch_init(void) {
   for (size_t i = 1; i < 4; ++i) {
     const WindowsSite *site = windows_hook_sites + i;
     size_t location = i * 128;
-    memcpy(stubs + location, site->expected, site->length);
-    windows_absolute_jump(stubs + location + site->length,
-                          (void *)(base + site->rva + site->length));
+    memcpy(stubs + location, (void *)native_address(site->symbol),
+           site->length);
+    windows_absolute_jump(
+        stubs + location + site->length,
+        (void *)(native_address(site->symbol) + site->length));
     windows_absolute_jump(stubs + location + 64, hooks[i]);
   }
   original_colour = (void *)(stubs + 128);
@@ -341,7 +342,7 @@ static __attribute__((noinline)) int windows_patch_init(void) {
     return 0;
   for (size_t i = 0; i < 4; ++i) {
     const WindowsSite *site = windows_hook_sites + i;
-    unsigned char *address = (void *)(base + site->rva);
+    unsigned char *address = (void *)(native_address(site->symbol));
     unsigned char *target = i ? stubs + i * 128 + 64 : stubs;
     int64_t delta =
         (int64_t)(uintptr_t)target - (int64_t)(uintptr_t)(address + 5);
