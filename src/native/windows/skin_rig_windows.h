@@ -55,7 +55,8 @@ static void windows_find_root(void *storage, NativeFileMatch *files,
   void (*append)(NativeFileMatch *, const void *) =
       (void *)native_address(DD_APPEND_MATCH);
   match_palette_root(original_find_root, append, destroy_match, storage, files,
-                     device, root, directory, pattern, details, order, flags);
+                     device, root, windows_alternate_root(device, root),
+                     directory, pattern, details, order, flags);
 }
 static void windows_match_files(NativeFileMatch *files, int mount,
                                 const char *directory, const char *pattern,
