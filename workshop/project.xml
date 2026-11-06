@@ -7,7 +7,7 @@
   <ModDataPath>./content/</ModDataPath>
   <Title>暗黑地牢引擎补丁 | Darkest Dungeon Patches</Title>
   <Language>schinese</Language>
-  <UpdateDetails>v1.1.0：Windows x64 WinMM 代理自动加载；最小安装；三项补丁与跨平台安装、卸载说明。</UpdateDetails>
+  <UpdateDetails>v1.1.1：修复 Windows 工坊皮肤同名目录被合并的问题，按完整 Mod 来源保留独立皮肤；保留原版与竞技场 DLC 的皮肤条目。</UpdateDetails>
   <Visibility>public</Visibility>
   <UploadMode>direct_upload</UploadMode>
   <VersionMajor>1</VersionMajor>
@@ -50,7 +50,7 @@ Windows 仅支持上述两个目录的 x64 入口。首次从旧版启动器迁�
 [b]Linux：[/b]正常退出游戏，恢复原来的 Steam 启动选项，移除本补丁的环境变量和两个 SO 路径，之后可删除这两个 SO。
 
 [h1]下载、源码与反馈[/h1]
-[url=https://github.com/ghideinm/darkest_dungeon_patches/releases/tag/v1.1.0]v1.1.0 发布包[/url]
+[url=https://github.com/ghideinm/darkest_dungeon_patches/releases/tag/v1.1.1]v1.1.1 发布包[/url]
 [url=https://space.bilibili.com/398692528][img]https://static.hdslb.com/images/favicon.png[/img][/url] [url=https://space.bilibili.com/398692528]作者 B站主页[/url]
 [url=https://github.com/ghideinm/darkest_dungeon_patches][img]https://github.githubassets.com/favicons/favicon.png[/img][/url] [url=https://github.com/ghideinm/darkest_dungeon_patches]GitHub 项目、源码与问题反馈[/url]
 
