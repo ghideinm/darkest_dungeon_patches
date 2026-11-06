@@ -8,7 +8,9 @@
 
 从 [Releases](https://github.com/ghideinm/darkest_dungeon_patches/releases) 下载并解压 `darkest_dungeon_patches.zip`。补丁不包含皮肤资源，所需 Mod 请自行安装并启用。
 
-## Linux
+## 安装
+
+### Linux
 
 使用原生 x86-64 游戏，在 Steam 兼容性设置中关闭强制 Proton。
 
@@ -25,9 +27,7 @@
 
 **更新：** 退出游戏，替换原位置的两个 SO。
 
-**撤销：** 从 Steam 启动选项中移除本补丁的环境变量及 SO 路径，恢复原参数。
-
-## Windows
+### Windows
 
 1. 正常退出游戏。从旧版 Steam 启动器迁移时，也请退出 Steam 客户端。
 2. 双击 `dd_patch_setup.exe` 完成安装。
@@ -51,13 +51,31 @@ winmm.ini             # 关闭代理日志和崩溃转储
 
 **更新：** 正常退出游戏，运行新版 `dd_patch_setup.exe`。
 
-**撤销：** 正常退出游戏，运行以下命令删除安装的三个文件：
+已有其他 Mod 的 `winmm.dll` 时，安装器会拒绝覆盖。代理使用 [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)，许可见发布包的 `ultimate_asi_loader_license.txt`，或运行安装器的 `--license`。
+
+## 卸载
+
+### Linux
+
+1. 正常退出游戏。
+2. Steam →《暗黑地牢》→ 属性 → 通用 → 启动选项，恢复安装前的内容。若只填写了上面的示例，清空即可；与其他库共用 `LD_PRELOAD` 时，保留其他库，只移除本补丁的两个 SO 路径和本补丁添加的 `DD_*` 环境变量。
+3. 之后可删除 `libdd_resource_loading_patch.so`、`libdd_skin_rig_patch.so`，以及 `DD_PATCH_LOG` 指定的补丁日志。
+
+### Windows
+
+正常退出游戏，在 `dd_patch_setup.exe` 所在目录打开 PowerShell，运行：
 
 ```powershell
 .\dd_patch_setup.exe --uninstall
 ```
 
-已有其他 Mod 的 `winmm.dll` 时，安装器会拒绝覆盖。代理使用 [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)，许可见发布包的 `ultimate_asi_loader_license.txt`，或运行安装器的 `--license`。
+安装器会自动定位游戏，删除两个 x64 入口目录内的补丁文件。需要指定游戏根目录时：
+
+```powershell
+.\dd_patch_setup.exe --uninstall --game-root "D:\SteamLibrary\steamapps\common\DarkestDungeon"
+```
+
+也可手动删除 `_windows/win64`、`_windowsnosteam/win64` 中安装的 `winmm.dll`、`dd_engine_patch.asi` 和 `winmm.ini`。
 
 ## 日志与排错
 
