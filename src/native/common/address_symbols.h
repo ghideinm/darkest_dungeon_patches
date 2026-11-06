@@ -54,6 +54,7 @@ typedef enum {
   DD_SET_TIME,
   DD_STEP_ID,
   DD_STORAGE,
+  DD_APPEND_MATCH,
   DD_SYMBOL_COUNT
 } DdSymbol;
 typedef struct {

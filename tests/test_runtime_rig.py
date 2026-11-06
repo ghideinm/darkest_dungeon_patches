@@ -95,6 +95,85 @@ class RuntimeRigTest(RuntimeRigFixture, unittest.TestCase):
         self.assertEqual(self.resolve().stdout.strip(), "mods/chosen/heroes/alpha/anim")
 
 
+class PaletteEnumerationTest(unittest.TestCase):
+    def test_native_merge_preserves_three_sources_only_for_palette_queries(self):
+        with tempfile.TemporaryDirectory(prefix="dd-palette-test-") as directory:
+            root = Path(directory)
+            source = root / "palette.c"
+            source.write_text(r"""#define DD_PALETTE_SOURCES_TEST
+#include "palette_sources.h"
+#include <assert.h>
+#include <stdlib.h>
+static unsigned destroyed, appended;
+static void append(NativeFileMatch *files, const void *name) {
+  size_t count = files->begin ? (size_t)(files->end-files->begin) : 0;
+  files->begin = realloc(files->begin, (count+1)*256);
+  assert(files->begin);
+  memcpy(files->begin[count], name, 256);
+  files->end = files->capacity = files->begin+count+1;
+  ++appended;
+}
+static void destroy(NativeFileMatch *files) {
+  free(files->begin); *files = (NativeFileMatch){0}; ++destroyed;
+}
+static void native_merge(void *storage, NativeFileMatch *files, void *device,
+                         unsigned root, const char *directory,
+                         const char *pattern, int details, int order, int flags) {
+  assert(storage == (void*)1 && device == (void*)2 && root < 3);
+  (void)directory; (void)pattern; (void)details; (void)order; (void)flags;
+  for (unsigned i=0; i<4; ++i) {
+    char name[256] = {0}; snprintf(name,sizeof(name),"alpha_%c",'A'+i);
+    char (*at)[256] = files->begin;
+    while(at != files->end && strcmp(*at,name)) ++at;
+    if(at == files->end) append(files,name);
+  }
+}
+int main(void) {
+  const char *pattern = "(.*)alpha_([A-Z])(\\\\|/)";
+  NativeFileMatch files = {0};
+  native_merge((void*)1,&files,(void*)2,0,"heroes/alpha/",pattern,0,0,0);
+  for(unsigned root=1;root<3;++root)
+    match_palette_root(native_merge,append,destroy,(void*)1,&files,(void*)2,
+                        root,"heroes/alpha/",pattern,0,0,0);
+  assert(files.end-files.begin == 12 && destroyed == 2 && appended == 20);
+  for(unsigned i=0;i<12;++i) assert(files.begin[i][6] == 'A'+i%4);
+  destroy(&files);
+  const char *directories[] = {"heroes/alpha/anim/","monsters/alpha/",
+                               "heroes/alpha/","heroes/alpha/","heroes/alpha/",
+                               "heroes/alpha/","heroes/alpha/"};
+  for(unsigned i=0;i<7;++i) {
+    files = (NativeFileMatch){0};
+    native_merge((void*)1,&files,(void*)2,0,"heroes/alpha/",pattern,0,0,0);
+    unsigned before = destroyed;
+    match_palette_root(native_merge,append,destroy,(void*)1,&files,(void*)2,1,
+                        directories[i], i==2 ? "(.*)alpha_([A-Z])" : pattern,
+                        i==3, i==4, i==5 ? 4 : i==6 ? 1 : 0);
+    assert(files.end-files.begin == 4 && destroyed == before);
+    destroy(&files);
+  }
+  return 0;
+}
+""")
+            binary = root / "palette"
+            subprocess.run(
+                [
+                    "clang",
+                    "-std=c11",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-fsanitize=address,undefined",
+                    "-I",
+                    str(COMMON_NATIVE),
+                    str(source),
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+            )
+            subprocess.run([str(binary)], check=True)
+
+
 class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
     """Exercise the production discovery/loading path with controlled native APIs."""
 
@@ -136,7 +215,7 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
             ctypes.c_uint,
         ]
         cls.library.dd_runtime_test_texture.restype = ctypes.c_char_p
-        cls.library.dd_runtime_test_bind_sources.argtypes = [ctypes.c_void_p] * 6
+        cls.library.dd_runtime_test_bind_sources.argtypes = [ctypes.c_void_p] * 6 + [ctypes.c_int]
         cls.library.dd_runtime_test_source.argtypes = [ctypes.c_void_p, ctypes.c_uint]
         cls.library.dd_runtime_test_source.restype = ctypes.c_char_p
 
@@ -258,7 +337,7 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         )
         self.Vector, self.callback = Vector, callback
 
-    def bind_catalog(self, roots=None):
+    def bind_catalog(self, roots=None, preserve_sources=False):
         ptr = ctypes.c_void_p
         # Archive-backed Mod indices omit the trailing directory separator;
         # the base Linux directory enumeration includes it. Keep both entries.
@@ -270,6 +349,10 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         self.native_paths = [f"heroes/alpha/alpha_{c}//" for c in "ABCD"] + [
             f"heroes/alpha/alpha_{c}/" for c in "ABCDE"
         ]
+        if preserve_sources:
+            self.native_paths = [f"heroes/alpha/alpha_{c}/" for c in "ABCD"] + [
+                f"heroes/alpha/{name}/" for _, names in reversed(self.root_specs) for name in names
+            ]
         self.path_buffers = [ctypes.create_string_buffer(p.encode()) for p in self.native_paths]
         self.root_buffers = []
         for i, (origin, _) in enumerate(self.root_specs):
@@ -294,7 +377,7 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
 
         def match(target, device, directory, pattern, details, depth, flags):
             self.assertEqual((directory, details, depth, flags), (b"heroes/alpha/", 0, 0, 0))
-            fill(target, [f"alpha_{c}/" for c in "ABCD"])
+            fill(target, [f"alpha_{c}" + ("" if preserve_sources else "/") for c in "ABCD"])
 
         def archive(device, target, directory, pattern, details, depth, include):
             fill(target, self.root_specs[device - 1][1])
@@ -335,6 +418,7 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
                 ],
                 archive,
             ),
+            preserve_sources,
         )
 
     def texture(self, origin, skin, filename):
@@ -370,6 +454,34 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         self.bind_catalog()
         self.path_buffers[0], self.path_buffers[1] = self.path_buffers[1], self.path_buffers[0]
         self.assertIsNone(self.library.dd_runtime_test_source(0x55, 0))
+
+    def test_windows_catalog_keeps_base_and_two_workshop_sources_with_identical_names(self):
+        first = "C:/Steam/steamapps/workshop/content/262060/101/"
+        second = "C:/Steam/steamapps/workshop/content/262060/202/"
+        self.bind_catalog(
+            roots=[
+                (second, [f"alpha_{c}" for c in "ABCD"]),
+                (first, [f"alpha_{c}" for c in "ABCD"]),
+            ],
+            preserve_sources=True,
+        )
+        origins = [self.library.dd_runtime_test_source(0x55, i).decode() for i in range(12)]
+        self.assertEqual(origins, [""] * 4 + [first] * 4 + [second] * 4)
+        for origin in set(origins):
+            self.rig(origin + "heroes/alpha/anim", action="idle", pages=("idle.png",))
+        for i, origin in enumerate(origins):
+            skin = f"heroes/alpha/alpha_{'ABCD'[i % 4]}"
+            self.texture(origin, skin, "idle.png")
+            self.assertEqual(
+                self.library.dd_runtime_test_sprite_at(skin.encode(), origin.encode()), 0x1234
+            )
+            self.assertEqual(
+                self.loaded[-1][0], f">{origin}heroes/alpha/anim/alpha.sprite.idle.skel"
+            )
+            self.assertEqual(
+                self.library.dd_runtime_test_texture(skin.encode(), origin.encode(), 0).decode(),
+                f">{origin}{skin}/anim/",
+            )
 
     def test_pinned_partial_mod_falls_back_to_base_and_dlc_without_other_mod(self):
         self.bind_catalog(roots=[("dlc/official/", [])])

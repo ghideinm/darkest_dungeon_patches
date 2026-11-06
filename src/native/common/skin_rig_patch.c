@@ -31,6 +31,7 @@ static int windows_log(int descriptor, const char *format, ...);
 #endif
 
 #include "address_profile.h"
+#include "palette_sources.h"
 
 /* Original instructions are checked before native hooks run. */
 typedef struct {
@@ -366,9 +367,7 @@ static void (*set_animation)(void *, const char *, int, int);
 static int runtime_enabled;
 static unsigned (*colour_count)(void *);
 static const char *(*colour_path)(void *, unsigned);
-typedef struct {
-  char (*begin)[256], (*end)[256], (*capacity)[256];
-} NativeFileMatch;
+static int preserve_palette_sources;
 static void (*match_files)(NativeFileMatch *, int, const char *, const char *,
                            int, int, int);
 static void (*destroy_match)(NativeFileMatch *);
@@ -437,10 +436,12 @@ static int add_catalog_files(SkinCatalog *catalog, size_t limit,
     if (!memchr(raw, 0, 256))
       return 0;
     size_t j;
-    /* This is the native details=0/flags=0 duplicate rule, before trimming.
-     * A directory name ending in '/' is distinct from one without it. */
+    /* Linux follows the native raw-name merge. Windows preserves each root
+     * during enumeration, so its identity includes both source and name. */
     for (j = 0; j < catalog->count; ++j)
-      if (!strcmp(catalog->entries[j].raw, raw))
+      if (!strcmp(catalog->entries[j].raw, raw) &&
+          (!preserve_palette_sources ||
+           !strcmp(catalog->entries[j].origin, origin)))
         break;
     if (j != catalog->count)
       continue;
@@ -943,6 +944,7 @@ void dd_runtime_test_bind(
   for (size_t i = 0; i < catalog_count; ++i)
     free(catalogs[i].entries);
   catalog_count = 0;
+  preserve_palette_sources = 0;
   alternate_count = NULL;
   override_route = NULL;
   match_files = match;
@@ -978,13 +980,15 @@ void dd_runtime_test_bind_sources(
                   int, int),
     unsigned (*roots)(void *), const void *(*root)(void *, unsigned),
     void (*archive)(void *, NativeFileMatch *, const char *, const char *, int,
-                    int, bool)) {
+                    int, bool),
+    int preserve_sources) {
   colour_count = count;
   colour_path = path;
   match_device = match;
   alternate_count = roots;
   alternate_root = root;
   match_archive = archive;
+  preserve_palette_sources = preserve_sources;
 }
 const char *dd_runtime_test_source(void *klass, unsigned index) {
   const SkinCatalog *catalog = source_catalog(klass);

@@ -298,6 +298,7 @@ int wmain(void) {
  if(cap!=expected)return 12;
  if(image[DD_COLOUR_RVA]!=(original?0x48:0xe9))return 13;
  if(image[DD_RENDER_RVA]!=(original?0xbf:0x90))return 14;
+ if(image[DD_PALETTE_RVA]!=(original?0x48:0xe9))return 18;
  MEMORY_BASIC_INFORMATION info;
  if(!VirtualQuery(image+DD_RESOURCE_RVA,&info,sizeof(info)) || info.Protect!=PAGE_EXECUTE_READ)return 15;
  void (*init)(void)=(void*)GetProcAddress(plugin,"InitializeASI");init();
@@ -312,6 +313,7 @@ int wmain(void) {
                 f"-DDD_RESOURCE_RVA={fixture.symbols['RESOURCE_0'] + 1}",
                 f"-DDD_COLOUR_RVA={fixture.symbols['HOOK_COLOUR']}",
                 f"-DDD_RENDER_RVA={fixture.symbols['RENDER_0']}",
+                f"-DDD_PALETTE_RVA={fixture.symbols['FULL_PATH']}",
             ]
             binary = root / "fixture.exe"
             subprocess.run(

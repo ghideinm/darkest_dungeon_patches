@@ -47,6 +47,16 @@ static void windows_match_device(NativeFileMatch *files, void *device,
                bool) = pointer_at(pointer_at(device, 0), 0x48);
   find(device, files, directory, pattern, details, order, (flags & 4) != 0);
 }
+static PaletteRootMatch original_find_root;
+static void windows_find_root(void *storage, NativeFileMatch *files,
+                              void *device, unsigned root,
+                              const char *directory, const char *pattern,
+                              int details, int order, int flags) {
+  void (*append)(NativeFileMatch *, const void *) =
+      (void *)native_address(DD_APPEND_MATCH);
+  match_palette_root(original_find_root, append, destroy_match, storage, files,
+                     device, root, directory, pattern, details, order, flags);
+}
 static void windows_match_files(NativeFileMatch *files, int mount,
                                 const char *directory, const char *pattern,
                                 int details, int order, int flags) {
@@ -283,6 +293,7 @@ static int windows_guard_sites(const DdWindowsImage *image,
 }
 static int windows_rig_plan(DdWindowsPatches *plan, unsigned char **allocated) {
   runtime_enabled = 1;
+  preserve_palette_sources = 1;
   const char *map = getenv("DD_RIG_MAP");
   if (map && *map) {
     FILE *file = fopen(map, "r");
@@ -314,8 +325,10 @@ static int windows_rig_plan(DdWindowsPatches *plan, unsigned char **allocated) {
   *allocated = stubs;
   memcpy(stubs, "\x49\x89\xd8", 3); /* r8 = captured Hero in rbx */
   windows_absolute_jump(stubs + 3, new_actor_sprite);
-  void *hooks[] = {NULL, change_colour, change_preview, override_textures};
-  for (size_t i = 1; i < 4; ++i) {
+  void *hooks[] = {NULL, change_colour, change_preview, override_textures,
+                   windows_find_root};
+  size_t hook_count = sizeof(windows_hook_sites) / sizeof(*windows_hook_sites);
+  for (size_t i = 1; i < hook_count; ++i) {
     const WindowsSite *site = windows_hook_sites + i;
     size_t location = i * 128;
     memcpy(stubs + location, (void *)native_address(site->symbol),
@@ -328,11 +341,12 @@ static int windows_rig_plan(DdWindowsPatches *plan, unsigned char **allocated) {
   original_colour = (void *)(stubs + 128);
   original_preview = (void *)(stubs + 256);
   original_override = (void *)(stubs + 384);
+  original_find_root = (void *)(stubs + 512);
   DWORD previous;
   if (!VirtualProtect(stubs, 4096, PAGE_EXECUTE_READ, &previous) ||
       !FlushInstructionCache(GetCurrentProcess(), stubs, 4096))
     return 0;
-  for (size_t i = 0; i < 4; ++i) {
+  for (size_t i = 0; i < hook_count; ++i) {
     const WindowsSite *site = windows_hook_sites + i;
     unsigned char *address = (void *)(native_address(site->symbol));
     unsigned char *target = i ? stubs + i * 128 + 64 : stubs;

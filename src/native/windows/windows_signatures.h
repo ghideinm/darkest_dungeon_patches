@@ -62,6 +62,10 @@ static const DdSignature dd_signatures[] = {
      "40 53 48 83 ec 20 48 8b 01 48 8b d9 48 85 c0 74 ?? 48 8b 51 10 48 2b d0 "
      "48 81 e2 00 ff",
      DD_DESTROY_MATCH, 4, 0, 0, 0, 1},
+    {"append_match",
+     "48 89 5c 24 10 48 89 6c 24 18 56 57 41 54 41 56 41 57 48 83 ec 50 48 8b "
+     "da 48 8b f1 48 8b 79 08 48 8b 49 10 48 3b f9 74 ?? b8 02 00 00 00",
+     DD_APPEND_MATCH, 4, 0, 0, 0, 1},
     {"load_spine",
      "40 55 53 56 57 41 54 41 55 41 56 41 57 48 8d 6c 24 e1 48 81 ec b8 00 00 "
      "00 48 8b 05 ?? ?? ?? ?? 48 33 c4 48 89 45 0f 4d",
