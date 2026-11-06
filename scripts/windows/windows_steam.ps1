@@ -159,15 +159,16 @@ function Find-SteamUser([string]$Root,[string]$User) {
     return $User
 }
 function Find-SteamGame([string]$Root) {
-    $roots = [Collections.Generic.List[string]]::new(); $roots.Add($Root)
+    $roots = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    [void]$roots.Add([IO.Path]::GetFullPath($Root))
     $libraries = Join-Path $Root 'steamapps\libraryfolders.vdf'
     if (Test-Path -LiteralPath $libraries) {
         $node = Get-VdfChild (Read-Vdf ([IO.File]::ReadAllText($libraries))) 'libraryfolders'
         foreach ($library in $node.Children) {
-            if ($library.Key -match '^\d+$') { $path = Get-VdfChild $library 'path'; if ($path) { $roots.Add($path.Value) } }
+            if ($library.Key -match '^\d+$') { $path = Get-VdfChild $library 'path'; if ($path) { [void]$roots.Add([IO.Path]::GetFullPath($path.Value)) } }
         }
     }
-    $games = @($roots.ToArray() | Select-Object -Unique | ForEach-Object {
+    $games = @($roots | ForEach-Object {
         $manifest = Join-Path $_ 'steamapps\appmanifest_262060.acf'
         if (Test-Path -LiteralPath $manifest) {
             $app = Get-VdfChild (Read-Vdf ([IO.File]::ReadAllText($manifest))) 'AppState'

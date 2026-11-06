@@ -72,6 +72,18 @@ try {
     Assert ($preview -eq 0) 'Preview blocked a valid unknown-layout executable.'
     $native = Invoke-Native (Join-Path $BundleRoot 'dd_windows_launcher.exe') ('--game "'+$binary+'" --check')
     Assert ($native -eq 0) 'Native check blocked a valid unknown-layout executable.'
+    # Registry and libraryfolders paths commonly differ in case and slashes.
+    $installedGame = Join-Path $steam 'steamapps\common\Fixture game'
+    $installedBinary = Join-Path $installedGame '_windows\win64\Darkest.exe'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $installedBinary) -Force | Out-Null
+    [IO.File]::WriteAllBytes($installedBinary,$header)
+    [IO.File]::WriteAllText((Join-Path $steam 'steamapps\appmanifest_262060.acf'),'"AppState" { "installdir" "Fixture game" }')
+    $alias = $steam.Replace('\','/').ToLowerInvariant()
+    [IO.File]::WriteAllText((Join-Path $steam 'steamapps\libraryfolders.vdf'),'"libraryfolders" { "0" { "path" "'+$alias+'" } }')
+    $automatic = Invoke-Native $setup ('--preview '+$options)
+    Assert ($automatic -eq 0) 'Automatic discovery treated equivalent Steam paths as different installations.'
+    $discovered = [IO.File]::ReadAllText($log)|ConvertFrom-Json
+    Assert ($discovered.game -ieq $installedBinary) 'Automatic discovery selected a different game.'
     Write-Host 'Windows EXE payload, PowerShell 5 setup, checksums and compatibility checks passed.'
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force

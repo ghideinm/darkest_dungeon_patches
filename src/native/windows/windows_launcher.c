@@ -5,7 +5,6 @@
 #include "windows_arguments.h"
 #include "windows_image.h"
 #include "windows_profile.h"
-#include <share.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,19 +13,27 @@
 #include <tlhelp32.h>
 #include <wchar.h>
 
-static FILE *log_file;
+static HANDLE log_file = INVALID_HANDLE_VALUE;
+static int report_stderr = 1;
 static void report(const char *format, ...) {
   va_list arguments, copy;
   va_start(arguments, format);
-  va_copy(copy, arguments);
-  vfprintf(stderr, format, arguments);
-  if (log_file) {
-    /* The injected DLL appends using its own shared handle. */
-    (void)fseek(log_file, 0, SEEK_END);
-    vfprintf(log_file, format, copy);
-    fflush(log_file);
+  if (report_stderr) {
+    va_copy(copy, arguments);
+    vfprintf(stderr, format, copy);
+    va_end(copy);
   }
-  va_end(copy);
+  if (log_file != INVALID_HANDLE_VALUE) {
+    char line[4096];
+    int length = vsnprintf(line, sizeof(line), format, arguments);
+    if (length > 0) {
+      DWORD count = (DWORD)((size_t)length < sizeof(line) ? (size_t)length
+                                                          : sizeof(line) - 1);
+      DWORD written;
+      /* Kernel append semantics also preserve writes from the injected DLL. */
+      (void)WriteFile(log_file, line, count, &written, NULL);
+    }
+  }
   va_end(arguments);
 }
 static int read_at(HANDLE file, uint64_t offset, void *out, DWORD size) {
@@ -490,8 +497,12 @@ int wmain(int argc, wchar_t **argv) {
           stderr);
     return 125;
   }
-  if (steam_mode)
+  if (steam_mode) {
+    /* FreeConsole closes OS handles without updating the CRT's stderr. A
+     * later file can reuse that handle, causing duplicate or corrupt logs. */
+    report_stderr = 0;
     (void)FreeConsole();
+  }
   DWORD count = GetModuleFileNameW(NULL, home, 32768);
   if (!count || count >= 32768)
     return 125;
@@ -507,8 +518,10 @@ int wmain(int argc, wchar_t **argv) {
   wcscpy(log_path, home);
   wcscat(log_path, L"windows_launch.log");
   if (!check) {
-    log_file = _wfsopen(log_path, L"w", _SH_DENYNO);
-    if (!log_file)
+    log_file = CreateFileW(log_path, FILE_APPEND_DATA,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (log_file == INVALID_HANDLE_VALUE)
       report("DD_WINDOWS_LOG_UNAVAILABLE error=%lu\n", GetLastError());
     SetEnvironmentVariableW(L"DD_WINDOWS_PATCH_LOG", log_path);
   }
@@ -572,8 +585,8 @@ int wmain(int argc, wchar_t **argv) {
       report("DD_WINDOWS_PATCH_SKIPPED reason=initialization_failed\n");
     result = launch_unmodified(game, command, directory);
   }
-  if (log_file)
-    fclose(log_file);
+  if (log_file != INVALID_HANDLE_VALUE)
+    CloseHandle(log_file);
   return result ? 0 : 125;
 }
 #else

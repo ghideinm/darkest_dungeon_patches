@@ -38,6 +38,46 @@ class WindowsSteamSetupTest(unittest.TestCase):
 
         return json.loads(result.stdout)
 
+    def test_library_discovery_normalizes_paths_and_rejects_distinct_games(self):
+        import json
+
+        with tempfile.TemporaryDirectory(prefix="dd-steam-discovery-") as directory:
+            root = Path(directory)
+            client, other = root / "Steam with spaces", root / "Other library"
+            for library in (client, other):
+                binary = library / "steamapps/common/Fixture/_windows/win64/Darkest.exe"
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"own fixture")
+                (library / "steamapps/appmanifest_262060.acf").write_text(
+                    '"AppState" { "installdir" "Fixture" }'
+                )
+            paths = root / "paths.json"
+            paths.write_text(json.dumps(dict(client=str(client), other=str(other), root=str(root))))
+            script = (
+                ". '"
+                + str(WINDOWS_SCRIPTS / "windows_steam.ps1")
+                + "' -InstallRoot '"
+                + str(root)
+                + "'\n"
+                + "$x=Get-Content -Raw '"
+                + str(paths)
+                + "'|ConvertFrom-Json\n"
+                + r"""
+$folders=Join-Path $x.client 'steamapps/libraryfolders.vdf'
+$alias=$x.client+'/../Steam with spaces'
+$text='"libraryfolders" { "0" { "path" '+(ConvertTo-VdfToken $alias)+' }'
+[IO.File]::WriteAllText($folders,$text+' }')
+$found=Find-SteamGame $x.client
+[IO.File]::WriteAllText($folders,$text+' "1" { "path" '+(ConvertTo-VdfToken $x.other)+' } }')
+$ambiguous=$false
+try{Find-SteamGame $x.client|Out-Null}catch{$ambiguous=$_.Exception.Message.Contains('ambiguous')}
+[ordered]@{found=$found;ambiguous=$ambiguous}|ConvertTo-Json
+"""
+            )
+            result = self.run_powershell(script, root)
+            self.assertEqual(Path(result["found"]), client / "steamapps/common/Fixture")
+            self.assertTrue(result["ambiguous"])
+
     def test_lossless_vdf_roundtrip_and_wrapper_arguments(self):
         import json
 
@@ -382,7 +422,7 @@ int wmain(int argc, wchar_t **argv) {
                 [*common, "-municode", str(project / "windows_launcher.c"), "-o", str(production)],
                 check=True,
             )
-            for failure in ("matching", "instruction", "library"):
+            for failure in ("matching", "steam", "instruction", "library"):
                 with self.subTest(failure=failure):
                     marker.unlink()
                     candidate = bytearray(data)
@@ -402,11 +442,16 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved) {
                         )
                     executable.write_bytes(candidate)
                     result = subprocess.run(
-                        [runner, str(production), "--game", str(executable)],
+                        [
+                            runner,
+                            str(production),
+                            "--steam" if failure == "steam" else "--game",
+                            str(executable),
+                        ],
                         cwd=root,
                         env=(
                             environment
-                            if failure == "matching"
+                            if failure in ("matching", "steam")
                             else dict(environment, DD_FIXTURE_EXPECT_ORIGINAL="1")
                         ),
                         capture_output=True,
@@ -414,9 +459,21 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved) {
                         timeout=60,
                     )
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    if failure == "matching":
-                        self.assertIn("DD_WINDOWS_LAUNCHED", result.stderr)
-                        self.assertNotIn("DD_WINDOWS_PATCH_SKIPPED", result.stderr)
+                    if failure in ("matching", "steam"):
+                        log = (root / "windows_launch.log").read_text()
+                        for event in (
+                            "DD_WINDOWS_RESOURCE_APPLIED",
+                            "DD_WINDOWS_RENDER_APPLIED",
+                            "DD_RIG_PATCH_APPLIED",
+                            "DD_WINDOWS_DLL_READY",
+                            "DD_WINDOWS_LAUNCHED",
+                        ):
+                            self.assertEqual(log.count(event), 1, log)
+                        self.assertNotIn("DD_WINDOWS_PATCH_SKIPPED", log)
+                        if failure == "steam":
+                            self.assertNotIn("DD_WINDOWS_", result.stderr)
+                        else:
+                            self.assertIn("DD_WINDOWS_LAUNCHED", result.stderr)
                     else:
                         self.assertIn("DD_WINDOWS_PATCH_SKIPPED", result.stderr)
                         self.assertIn("DD_WINDOWS_UNMODIFIED_LAUNCHED", result.stderr)
