@@ -3,21 +3,10 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
 
 typedef struct {
   char (*begin)[256], (*end)[256], (*capacity)[256];
 } NativeFileMatch;
-
-/* Built-in mounts overlay the base game; they are not extra skin packs.
- * Workshop and other Mod roots keep their complete source identity. */
-static inline int palette_independent_source(const char *origin) {
-  return origin && *origin &&
-         !(!strncasecmp(origin, "dlc", 3) &&
-           (origin[3] == '/' || origin[3] == '\\')) &&
-         !(!strncasecmp(origin, "modes", 5) &&
-           (origin[5] == '/' || origin[5] == '\\'));
-}
 
 #if defined(_WIN32) || defined(DD_PALETTE_SOURCES_TEST)
 typedef void (*PaletteRootMatch)(void *, NativeFileMatch *, void *, unsigned,
@@ -44,11 +33,10 @@ static void match_palette_root(PaletteRootMatch find,
                                void (*append)(NativeFileMatch *, const void *),
                                void (*destroy)(NativeFileMatch *),
                                void *storage, NativeFileMatch *files,
-                               void *device, unsigned root, const char *origin,
+                               void *device, unsigned root,
                                const char *directory, const char *pattern,
                                int details, int order, int flags) {
-  if (!palette_independent_source(origin) ||
-      !palette_source_query(directory, pattern, details, order, flags)) {
+  if (!palette_source_query(directory, pattern, details, order, flags)) {
     find(storage, files, device, root, directory, pattern, details, order,
          flags);
     return;

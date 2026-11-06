@@ -119,9 +119,9 @@ static void destroy(NativeFileMatch *files) {
 static void native_merge(void *storage, NativeFileMatch *files, void *device,
                          unsigned root, const char *directory,
                          const char *pattern, int details, int order, int flags) {
-  assert(storage == (void*)1 && device == (void*)2 && root < 4);
+  assert(storage == (void*)1 && device == (void*)2 && root < 3);
   (void)directory; (void)pattern; (void)details; (void)order; (void)flags;
-  for (unsigned i=root==3 ? 4 : 0; i<(root==3 ? 5 : 4); ++i) {
+  for (unsigned i=0; i<4; ++i) {
     char name[256] = {0}; snprintf(name,sizeof(name),"alpha_%c",'A'+i);
     char (*at)[256] = files->begin;
     while(at != files->end && strcmp(*at,name)) ++at;
@@ -132,23 +132,11 @@ int main(void) {
   const char *pattern = "(.*)alpha_([A-Z])(\\\\|/)";
   NativeFileMatch files = {0};
   native_merge((void*)1,&files,(void*)2,0,"heroes/alpha/",pattern,0,0,0);
-  match_palette_root(native_merge,append,destroy,(void*)1,&files,(void*)2,
-                      0,"dlc/official/","heroes/alpha/",pattern,0,0,0);
-  assert(files.end-files.begin == 4 && destroyed == 0 && appended == 4);
   for(unsigned root=1;root<3;++root)
     match_palette_root(native_merge,append,destroy,(void*)1,&files,(void*)2,
-                        root,root==1 ? "mods/first/" : "C:/Workshop/second/",
-                        "heroes/alpha/",pattern,0,0,0);
+                        root,"heroes/alpha/",pattern,0,0,0);
   assert(files.end-files.begin == 12 && destroyed == 2 && appended == 20);
   for(unsigned i=0;i<12;++i) assert(files.begin[i][6] == 'A'+i%4);
-  const char *official[] = {"dlc/official/","DLC\\official/","modes/radiant/",""};
-  for(unsigned i=0;i<4;++i)
-    match_palette_root(native_merge,append,destroy,(void*)1,&files,(void*)2,0,
-                        official[i],"heroes/alpha/",pattern,0,0,0);
-  assert(files.end-files.begin == 12 && destroyed == 2 && appended == 20);
-  match_palette_root(native_merge,append,destroy,(void*)1,&files,(void*)2,3,
-                      "dlc/extra/","heroes/alpha/",pattern,0,0,0);
-  assert(files.end-files.begin == 13 && !strcmp(files.begin[12],"alpha_E"));
   destroy(&files);
   const char *directories[] = {"heroes/alpha/anim/","monsters/alpha/",
                                "heroes/alpha/","heroes/alpha/","heroes/alpha/",
@@ -158,7 +146,7 @@ int main(void) {
     native_merge((void*)1,&files,(void*)2,0,"heroes/alpha/",pattern,0,0,0);
     unsigned before = destroyed;
     match_palette_root(native_merge,append,destroy,(void*)1,&files,(void*)2,1,
-                        "mods/first/",directories[i], i==2 ? "(.*)alpha_([A-Z])" : pattern,
+                        directories[i], i==2 ? "(.*)alpha_([A-Z])" : pattern,
                         i==3, i==4, i==5 ? 4 : i==6 ? 1 : 0);
     assert(files.end-files.begin == 4 && destroyed == before);
     destroy(&files);
@@ -349,7 +337,7 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         )
         self.Vector, self.callback = Vector, callback
 
-    def bind_catalog(self, roots=None, preserve_sources=False, native_paths=None):
+    def bind_catalog(self, roots=None, preserve_sources=False):
         ptr = ctypes.c_void_p
         # Archive-backed Mod indices omit the trailing directory separator;
         # the base Linux directory enumeration includes it. Keep both entries.
@@ -365,8 +353,6 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
             self.native_paths = [f"heroes/alpha/alpha_{c}/" for c in "ABCD"] + [
                 f"heroes/alpha/{name}/" for _, names in reversed(self.root_specs) for name in names
             ]
-        if native_paths is not None:
-            self.native_paths = native_paths
         self.path_buffers = [ctypes.create_string_buffer(p.encode()) for p in self.native_paths]
         self.root_buffers = []
         for i, (origin, _) in enumerate(self.root_specs):
@@ -496,28 +482,6 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
                 self.library.dd_runtime_test_texture(skin.encode(), origin.encode(), 0).decode(),
                 f">{origin}{skin}/anim/",
             )
-
-    def test_windows_catalog_merges_official_mirrors_and_keeps_workshop_palettes(self):
-        workshop = "C:/Steam/steamapps/workshop/content/262060/101/"
-        self.bind_catalog(
-            roots=[
-                (workshop, [f"alpha_{c}" for c in "ABCD"]),
-                ("dlc/arena/", [f"alpha_{c}" for c in "ABCD"]),
-                ("modes/radiant/", [f"alpha_{c}" for c in "ABCD"]),
-            ],
-            preserve_sources=True,
-            native_paths=[f"heroes/alpha/alpha_{c}/" for c in "ABCDABCD"],
-        )
-        origins = [self.library.dd_runtime_test_source(0x55, i).decode() for i in range(8)]
-        self.assertEqual(origins, [""] * 4 + [workshop] * 4)
-
-    def test_windows_catalog_keeps_unique_official_palettes(self):
-        self.bind_catalog(
-            roots=[("dlc/extra/", ["alpha_E"])],
-            preserve_sources=True,
-        )
-        origins = [self.library.dd_runtime_test_source(0x55, i).decode() for i in range(5)]
-        self.assertEqual(origins, [""] * 4 + ["dlc/extra/"])
 
     def test_pinned_partial_mod_falls_back_to_base_and_dlc_without_other_mod(self):
         self.bind_catalog(roots=[("dlc/official/", [])])

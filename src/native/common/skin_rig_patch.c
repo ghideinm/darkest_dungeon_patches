@@ -436,11 +436,11 @@ static int add_catalog_files(SkinCatalog *catalog, size_t limit,
     if (!memchr(raw, 0, 256))
       return 0;
     size_t j;
-    /* Keep native merging for built-in overlays. Independent Mod palettes
-     * include their source identity, even when their logical names match. */
+    /* Linux follows the native raw-name merge. Windows preserves each root
+     * during enumeration, so its identity includes both source and name. */
     for (j = 0; j < catalog->count; ++j)
       if (!strcmp(catalog->entries[j].raw, raw) &&
-          (!preserve_palette_sources || !palette_independent_source(origin) ||
+          (!preserve_palette_sources ||
            !strcmp(catalog->entries[j].origin, origin)))
         break;
     if (j != catalog->count)
