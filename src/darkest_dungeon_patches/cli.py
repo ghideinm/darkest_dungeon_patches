@@ -17,6 +17,9 @@ def main():
     )
     parser.add_argument("--game-root", type=Path, default=DEFAULT_GAME_ROOT)
     parser.add_argument("--windows-cc", help="Windows x64 LLVM-MinGW Clang 编译器路径")
+    parser.add_argument(
+        "--windows-proxy", type=Path, help="固定版本的 x64 ASI Loader DLL；省略则构建时下载"
+    )
     parser.add_argument("--output", type=Path, help="发布包空目录；默认使用系统临时目录")
     args = parser.parse_args()
     if args.action == "test":
@@ -28,14 +31,20 @@ def main():
     if args.action == "bundle":
         from .release_bundle import build
 
-        print(json.dumps(build(args.output, args.windows_cc), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                build(args.output, args.windows_cc, args.windows_proxy),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return
     if args.action.startswith("windows_"):
         from . import windows_port
 
         game = args.game_root.expanduser().resolve() / "_windows/win64/Darkest.exe"
         result = (
-            windows_port.build(game, args.windows_cc)
+            windows_port.build(game, args.windows_cc, args.windows_proxy)
             if args.action == "windows_build"
             else windows_port.validate(game)
         )

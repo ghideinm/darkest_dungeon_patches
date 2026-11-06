@@ -1,8 +1,8 @@
 /* Included by skin_rig_patch.c after the shared source resolver. */
 #include "windows_image.h"
+#include "windows_patch.h"
 #include "windows_profile.h"
 
-static HANDLE windows_log_file = INVALID_HANDLE_VALUE;
 static int windows_log(int descriptor, const char *format, ...) {
   (void)descriptor;
   char line[4096];
@@ -12,11 +12,6 @@ static int windows_log(int descriptor, const char *format, ...) {
   va_end(arguments);
   if (length < 0)
     return length;
-  DWORD count = (DWORD)((size_t)length < sizeof(line) ? (size_t)length
-                                                      : sizeof(line) - 1);
-  DWORD written;
-  if (windows_log_file != INVALID_HANDLE_VALUE)
-    (void)WriteFile(windows_log_file, line, count, &written, NULL);
   OutputDebugStringA(line);
   return length;
 }
@@ -258,17 +253,35 @@ static unsigned char *windows_near_page(void) {
   }
   return NULL;
 }
-static __attribute__((noinline)) int windows_patch_init(void) {
-  base = (uintptr_t)GetModuleHandleW(NULL);
-  /* Thread-attach notifications can arrive on the game's 64 KiB worker
-   * stacks. Never let this long-path buffer become a DllMain stack frame. */
-  static wchar_t log_path[32768];
-  DWORD count = GetEnvironmentVariableW(L"DD_WINDOWS_PATCH_LOG", log_path,
-                                        (DWORD)(sizeof(log_path) / 2));
-  if (count && count < sizeof(log_path) / 2)
-    windows_log_file = CreateFileW(log_path, FILE_APPEND_DATA,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                                   OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+/* Available to debuggers and code tests, without persistent diagnostics. */
+__declspec(dllexport) const char dd_patch_identity[] =
+    "DarkestDungeonPatches.Win64.ProxyPlugin.v1";
+__declspec(dllexport) volatile LONG dd_windows_ready;
+__declspec(dllexport) struct {
+  DWORD size;
+  volatile LONG state;
+  DWORD requested, applied, error;
+} dd_patch_status = {sizeof(dd_patch_status), 0, 0, 0, 0};
+
+static int windows_option(const char *name) {
+  char value[16];
+  DWORD length = GetEnvironmentVariableA(name, value, sizeof(value));
+  return !length || length >= sizeof(value) || strcmp(value, "0");
+}
+static int windows_guard_sites(const DdWindowsImage *image,
+                               const WindowsSite *sites, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    const WindowsSite *site = sites + i;
+    uintptr_t address = native_address(site->symbol);
+    if (!dd_contains(image->ranges, image->count, address - base, site->length,
+                     DD_CODE) ||
+        !dd_guard((void *)address, site->expected, site->length, address,
+                  native_address(DD_NATIVE_NEW)))
+      return 0;
+  }
+  return 1;
+}
+static int windows_rig_plan(DdWindowsPatches *plan, unsigned char **allocated) {
   runtime_enabled = 1;
   const char *map = getenv("DD_RIG_MAP");
   if (map && *map) {
@@ -278,28 +291,6 @@ static __attribute__((noinline)) int windows_patch_init(void) {
     int valid = read_routes(file);
     fclose(file);
     if (!valid)
-      return 0;
-  }
-  DdWindowsImage image = {0};
-  const DdSignature *failed = NULL;
-  int matches = 0;
-  if (!dd_windows_loaded_image(base, &image) ||
-      !dd_resolve_profile(image.ranges, image.count, DD_GROUP_RIG,
-                          &native_symbols, &failed, &matches)) {
-    dprintf(2, "DD_RIG_PATCH_SKIPPED feature=%s matches=%d\n",
-            failed ? failed->name : "image_sections", matches);
-    return 0;
-  }
-  if (!native_fields_valid())
-    return 0;
-  for (size_t i = 0;
-       i < sizeof(windows_hook_sites) / sizeof(*windows_hook_sites); ++i) {
-    const WindowsSite *site = windows_hook_sites + i;
-    uintptr_t address = native_address(site->symbol);
-    if (!dd_contains(image.ranges, image.count, address - base, site->length,
-                     DD_CODE) ||
-        !dd_guard((void *)address, site->expected, site->length, address,
-                  native_address(DD_NATIVE_NEW)))
       return 0;
   }
   native_new = (void *)(native_address(DD_NATIVE_NEW));
@@ -320,6 +311,7 @@ static __attribute__((noinline)) int windows_patch_init(void) {
   unsigned char *stubs = windows_near_page();
   if (!stubs)
     return 0;
+  *allocated = stubs;
   memcpy(stubs, "\x49\x89\xd8", 3); /* r8 = captured Hero in rbx */
   windows_absolute_jump(stubs + 3, new_actor_sprite);
   void *hooks[] = {NULL, change_colour, change_preview, override_textures};
@@ -346,30 +338,91 @@ static __attribute__((noinline)) int windows_patch_init(void) {
     unsigned char *target = i ? stubs + i * 128 + 64 : stubs;
     int64_t delta =
         (int64_t)(uintptr_t)target - (int64_t)(uintptr_t)(address + 5);
-    if (delta < INT32_MIN || delta > INT32_MAX ||
-        !VirtualProtect(address, site->length, PAGE_EXECUTE_READWRITE,
-                        &previous))
-      _exit(125);
-    memset(address, 0x90, site->length);
-    address[0] = i ? 0xe9 : 0xe8;
+    if (delta < INT32_MIN || delta > INT32_MAX)
+      return 0;
+    unsigned char replacement[16];
+    memset(replacement, 0x90, sizeof(replacement));
+    replacement[0] = i ? 0xe9 : 0xe8;
     int32_t displacement = (int32_t)delta;
-    memcpy(address + 1, &displacement, 4);
-    DWORD ignored;
-    if (!FlushInstructionCache(GetCurrentProcess(), address, site->length) ||
-        !VirtualProtect(address, site->length, previous, &ignored))
-      _exit(125);
+    memcpy(replacement + 1, &displacement, 4);
+    if (!windows_plan_edit(plan, address, replacement, site->length))
+      return 0;
   }
-  dprintf(2, "DD_RIG_PATCH_APPLIED platform=windows_x64 mode=runtime_source\n");
   return 1;
 }
-__declspec(dllexport) volatile LONG dd_windows_ready;
+
+__declspec(dllexport) void InitializeASI(void) {
+  if (InterlockedCompareExchange(&dd_patch_status.state, 1, 0))
+    return;
+  base = (uintptr_t)GetModuleHandleW(NULL);
+  unsigned groups =
+      (windows_option("DD_LOADBUFFER_PATCH") ? DD_GROUP_RESOURCE : 0) |
+      (windows_option("DD_NATIVE_RENDER") ? DD_GROUP_RENDER : 0) |
+      (windows_option("DD_RIG_RUNTIME") ? DD_GROUP_RIG : 0);
+  dd_patch_status.requested = groups;
+  DdWindowsImage image = {0};
+  const DdSignature *failed = NULL;
+  int matches = 0;
+  dd_patch_status.error = 1;
+  if (!dd_windows_loaded_image(base, &image) ||
+      !dd_resolve_profile(image.ranges, image.count, groups, &native_symbols,
+                          &failed, &matches)) {
+    dprintf(2, "DD_PATCH_SKIPPED feature=%s matches=%d\n",
+            failed ? failed->name : "image_sections", matches);
+    goto refused;
+  }
+  dd_patch_status.error = 2;
+#define CHECK_SITES(table)                                                     \
+  windows_guard_sites(&image, table, sizeof(table) / sizeof(*table))
+  if (((groups & DD_GROUP_RESOURCE) && !CHECK_SITES(windows_resource_sites)) ||
+      ((groups & DD_GROUP_RENDER) && !CHECK_SITES(windows_render_sites)) ||
+      ((groups & DD_GROUP_RIG) &&
+       (!native_fields_valid() || !CHECK_SITES(windows_hook_sites) ||
+        !CHECK_SITES(windows_api_sites))))
+    goto refused;
+#undef CHECK_SITES
+  DdWindowsPatches plan = {0};
+  unsigned char *stubs = NULL;
+  dd_patch_status.error = 3;
+  if ((groups & DD_GROUP_RIG) && !windows_rig_plan(&plan, &stubs))
+    goto rollback;
+  if (groups & DD_GROUP_RESOURCE) {
+    const uint32_t cap = DD_WINDOWS_NEW_CAP;
+    for (size_t i = 0; i < sizeof(windows_resource_sites) / sizeof(WindowsSite);
+         ++i) {
+      const WindowsSite *site = windows_resource_sites + i;
+      if (!windows_plan_edit(
+              &plan, (void *)(native_address(site->symbol) + site->operand),
+              &cap, sizeof(cap)))
+        goto rollback;
+    }
+  }
+  if (groups & DD_GROUP_RENDER)
+    for (size_t i = 0; i < sizeof(windows_render_sites) / sizeof(WindowsSite);
+         ++i) {
+      const WindowsSite *site = windows_render_sites + i;
+      if (!windows_plan_edit(&plan, (void *)native_address(site->symbol),
+                             windows_render_replacements[i], site->length))
+        goto rollback;
+    }
+  dd_patch_status.error = 4;
+  if (!windows_commit(&plan))
+    goto rollback;
+  dd_patch_status.applied = groups;
+  dd_patch_status.error = 0;
+  InterlockedExchange(&dd_windows_ready, 1);
+  InterlockedExchange(&dd_patch_status.state, 2);
+  dprintf(2, "DD_PATCH_APPLIED groups=%u platform=windows_x64\n", groups);
+  return;
+rollback:
+  if (stubs)
+    (void)VirtualFree(stubs, 0, MEM_RELEASE);
+refused:
+  InterlockedExchange(&dd_patch_status.state, -1);
+}
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
   (void)instance;
   (void)reserved;
-  if (reason == DLL_PROCESS_ATTACH) {
-    if (!windows_patch_init())
-      return FALSE;
-    InterlockedExchange(&dd_windows_ready, 1);
-  }
+  (void)reason;
   return TRUE;
 }

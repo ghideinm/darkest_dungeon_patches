@@ -1,9 +1,7 @@
 param(
     [ValidateSet('Install','Preview','Status','Uninstall')][string]$Action = 'Install',
     [string]$SteamRoot,
-    [string]$SteamUser,
-    [string]$GameRoot,
-    [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'DarkestDungeonPatches\steam')
+    [string]$GameRoot
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -32,7 +30,7 @@ function Read-VdfEntries($Tokens,[ref]$Position,[bool]$Nested) {
         if ($key.Value -eq '{' -or $Position.Value+1 -ge $Tokens.Count) { throw 'Missing VDF value.' }
         $value = $Tokens[$Position.Value+1]
         $Position.Value += 2
-        $node = [pscustomobject]@{Key=(ConvertFrom-VdfToken $key.Value);Value=$null;Start=$value.Index;End=$value.Index+$value.Length;Close=0;Children=@()}
+        $node = [pscustomobject]@{Key=(ConvertFrom-VdfToken $key.Value);KeyStart=$key.Index;Value=$null;Start=$value.Index;End=$value.Index+$value.Length;Close=0;Children=@()}
         if ($value.Value -eq '{') {
             $node.Children = Read-VdfEntries $Tokens $Position $true
             if ($Position.Value -ge $Tokens.Count -or $Tokens[$Position.Value].Value -ne '}') { throw 'Unclosed VDF block.' }
@@ -82,13 +80,14 @@ function Get-SteamLaunchOptions([string]$Text) {
     if ($null -eq $node.Value) { throw 'Steam LaunchOptions must be a string.' }
     return $node.Value
 }
-function Set-SteamLaunchOptions([string]$Text,[AllowNull()][string]$Value) {
+function Set-SteamLaunchOptions([string]$Text,[AllowNull()]$Value) {
     $apps = Get-SteamApps $Text
     $app = Get-VdfChild $apps '262060'
     if ($app -and $null -ne $app.Value) { throw 'Steam app must be a block.' }
     $node = if ($app) { Get-VdfChild $app 'LaunchOptions' } else { $null }
     if ($node) {
         if ($null -eq $node.Value) { throw 'Steam LaunchOptions must be a string.' }
+        if ($null -eq $Value) { return $Text.Substring(0,$node.KeyStart)+$Text.Substring($node.End) }
         return $Text.Substring(0,$node.Start) + (ConvertTo-VdfToken $Value) + $Text.Substring($node.End)
     }
     if ($null -eq $Value) { return $Text }
@@ -98,14 +97,6 @@ function Set-SteamLaunchOptions([string]$Text,[AllowNull()][string]$Value) {
     }
     $insert = "`n`t`t`t`t`t" + '"262060"' + "`n`t`t`t`t`t{`n`t`t`t`t`t`t" + '"LaunchOptions"' + "`t`t" + (ConvertTo-VdfToken $Value) + "`n`t`t`t`t`t}`n`t`t`t`t"
     return $Text.Substring(0,$apps.Close)+$insert+$Text.Substring($apps.Close)
-}
-function Get-WrappedLaunchOptions([string]$Launcher,[AllowNull()][string]$Previous) {
-    if ($Launcher -match '["\r\n%]') { throw 'Unsupported launcher path.' }
-    $prefix = '"'+$Launcher+'" --steam '
-    $count = [regex]::Matches($Previous,'%command%').Count
-    if ($count -gt 1) { throw 'Multiple Steam command placeholders.' }
-    if ($count) { return $Previous.Replace('%command%',$prefix+'%command%') }
-    return $prefix+'%command%'+$(if ($Previous) { ' '+$Previous } else { '' })
 }
 function Assert-RegularPath([string]$Path) {
     if ((Test-Path -LiteralPath $Path) -and ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -130,7 +121,7 @@ function Read-SteamConfig([string]$Path) {
     if ($bom) { $text = $text.Substring(1) }
     return [pscustomobject]@{Bytes=$bytes;Text=$text;Encoding=$utf8}
 }
-function Write-SteamConfig([string]$Path,$Before,[AllowNull()][string]$Options) {
+function Write-SteamConfig([string]$Path,$Before,[AllowNull()]$Options) {
     if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) -cne [Convert]::ToBase64String($Before.Bytes)) {
         throw 'Steam configuration changed during installation; nothing overwritten.'
     }
@@ -143,20 +134,6 @@ function Find-SteamRoot {
     if (-not $path) { $path = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam' -ErrorAction SilentlyContinue).InstallPath }
     if (-not $path) { throw 'Steam installation missing; specify -SteamRoot.' }
     return $path
-}
-function Find-SteamUser([string]$Root,[string]$User) {
-    if (-not $User) {
-        $users = Get-VdfChild (Read-Vdf ([IO.File]::ReadAllText((Join-Path $Root 'config\loginusers.vdf')))) 'users'
-        $candidates = @($users.Children | Where-Object { $_.Key -match '^\d+$' } | ForEach-Object {
-            $recent = Get-VdfChild $_ 'MostRecent'; $timestamp = Get-VdfChild $_ 'Timestamp'
-            [pscustomobject]@{Id=([uint64]$_.Key-[uint64]76561197960265728).ToString();Recent=[int]($recent -and $recent.Value -eq '1');Timestamp=$(if($timestamp){[long]$timestamp.Value}else{0})}
-        } | Sort-Object -Property @{Expression='Recent';Descending=$true},@{Expression='Timestamp';Descending=$true})
-        if (-not $candidates.Count) { throw 'Steam login missing; specify -SteamUser.' }
-        if ($candidates.Count -gt 1 -and $candidates[0].Recent -eq $candidates[1].Recent -and $candidates[0].Timestamp -eq $candidates[1].Timestamp) { throw 'Steam account is ambiguous; specify -SteamUser.' }
-        $User = $candidates[0].Id
-    }
-    if ($User -notmatch '^\d+$') { throw '-SteamUser must be a numeric userdata ID.' }
-    return $User
 }
 function Find-SteamGame([string]$Root) {
     $roots = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -175,15 +152,15 @@ function Find-SteamGame([string]$Root) {
             $dir = Get-VdfChild $app 'installdir'
             if ($dir -and $dir.Value -notmatch '[\\/:]' -and $dir.Value -notin @('.','..')) {
                 $candidate = Join-Path $_ ('steamapps\common\'+$dir.Value)
-                if (Test-Path -LiteralPath (Join-Path $candidate '_windows\win64\Darkest.exe')) { $candidate }
+                if ((Test-Path -LiteralPath (Join-Path $candidate '_windows\win64\Darkest.exe')) -or (Test-Path -LiteralPath (Join-Path $candidate '_windowsnosteam\win64\Darkest.exe'))) { $candidate }
             }
         }
     } | Select-Object -Unique)
     if ($games.Count -ne 1) { throw 'Game installation missing or ambiguous; specify -GameRoot.' }
     return $games[0]
 }
-function Assert-SteamStopped {
-    if (Get-Process -Name steam,Darkest -ErrorAction SilentlyContinue) { throw 'Save and exit Darkest Dungeon and Steam normally before installing or uninstalling.' }
+function Assert-GameStopped {
+    if (Get-Process -Name Darkest,dd_windows_launcher -ErrorAction SilentlyContinue) { throw 'Save and exit Darkest Dungeon before installing or uninstalling.' }
 }
 function Assert-GameExecutable([string]$Path) {
     # Inspect only the executable format; game versions and full-file hashes
@@ -201,74 +178,94 @@ function Assert-GameExecutable([string]$Path) {
         if ($reader.ReadUInt16() -ne 0x20b) { throw 'Invalid Windows x64 game EXE format.' }
     } finally { $reader.Dispose() }
 }
-function Invoke-SteamSetup {
-    if (-not $SteamRoot) { $SteamRoot = Find-SteamRoot }
-    $SteamRoot = [IO.Path]::GetFullPath($SteamRoot)
-    $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
-    Assert-RegularPath $InstallRoot
-    $user = Find-SteamUser $SteamRoot $SteamUser
-    $config = Join-Path $SteamRoot ('userdata\'+$user+'\config\localconfig.vdf')
-    $before = Read-SteamConfig $config
-    $current = Get-SteamLaunchOptions $before.Text
-    $statePath = Join-Path $InstallRoot 'steam_install.json'
-    Assert-RegularPath $statePath
-    $stateBytes = if (Test-Path -LiteralPath $statePath) { [IO.File]::ReadAllBytes($statePath) } else { $null }
-    $state = if ($stateBytes) { [Text.Encoding]::UTF8.GetString($stateBytes)|ConvertFrom-Json } else { $null }
-    if ($state -and ($state.version -ne 1 -or $state.app_id -ne '262060' -or $state.localconfig -ine $config)) { throw 'Installation state belongs to another account or format.' }
-    if ($Action -eq 'Status') {
-        return [ordered]@{enabled=([bool]$state -and $current -ceq $state.launch_options);localconfig=$config;launch_options=$current;install_root=$InstallRoot}
+function Test-OurPlugin([string]$Path) {
+    return (Test-Path -LiteralPath $Path) -and [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Path)).Contains('DarkestDungeonPatches.Win64.ProxyPlugin.v1')
+}
+function Get-LegacyInstalls([string]$Root) {
+    foreach ($name in @('steam','codex_vm_test','windows_x64')) {
+        $folder=Join-Path $env:LOCALAPPDATA ('DarkestDungeonPatches\'+$name)
+        $path=Join-Path $folder 'steam_install.json'
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        Assert-RegularPath $folder; Assert-RegularPath $path
+        $state=[IO.File]::ReadAllText($path)|ConvertFrom-Json
+        if ($state.version -ne 1 -or $state.app_id -ne '262060') { throw 'Unknown legacy installation state.' }
+        $expected=Join-Path $Root '_windows\win64\Darkest.exe'
+        if ([IO.Path]::GetFullPath($state.game) -ine [IO.Path]::GetFullPath($expected)) { continue }
+        $client=if($SteamRoot){$SteamRoot}else{Find-SteamRoot}
+        $prefix=[IO.Path]::GetFullPath((Join-Path $client 'userdata'))+[IO.Path]::DirectorySeparatorChar
+        $config=[IO.Path]::GetFullPath($state.localconfig)
+        if (-not $config.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or $config.Substring($prefix.Length) -notmatch '^\d+[\\/]config[\\/]localconfig\.vdf$') { throw 'Invalid legacy Steam configuration path.' }
+        $before=Read-SteamConfig $config
+        if ((Get-SteamLaunchOptions $before.Text) -cne $state.launch_options) { throw 'Steam launch options changed after the old installation; restore them before migrating.' }
+        [pscustomobject]@{Folder=$folder;State=$path;Config=$config;Before=$before;Previous=$state.previous_launch_options}
     }
-    if ($state -and $current -cne $state.launch_options) { throw 'Steam launch options were edited after installation; refusing to overwrite.' }
-    if ($Action -eq 'Uninstall') {
-        Assert-SteamStopped
-        if ($state) { Write-SteamConfig $config $before $state.previous_launch_options; Remove-Item -LiteralPath $statePath }
-        return [ordered]@{enabled=$false;changed=[bool]$state;retained_binaries=$InstallRoot}
-    }
-    if (-not $GameRoot) { $GameRoot = Find-SteamGame $SteamRoot }
-    $game = Join-Path ([IO.Path]::GetFullPath($GameRoot)) '_windows\win64\Darkest.exe'
-    Assert-GameExecutable $game
-    $launcher = Join-Path $InstallRoot 'dd_windows_launcher.exe'
-    $previous = if ($state) { $state.previous_launch_options } else { $current }
-    $options = Get-WrappedLaunchOptions $launcher $previous
-    if ($Action -eq 'Preview') {
-        return [ordered]@{changed=$false;localconfig=$config;previous_launch_options=$previous;launch_options=$options;game=$game;install_root=$InstallRoot}
-    }
-    Assert-SteamStopped
-    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-    $names = @('dd_windows_launcher.exe','dd_skin_rig_patch.dll')
-    $saved = @{}
-    foreach ($name in $names) {
-        $destination = Join-Path $InstallRoot $name
-        Assert-RegularPath $destination
-        $saved[$name] = if(Test-Path -LiteralPath $destination){[IO.File]::ReadAllBytes($destination)}else{$null}
+}
+function Invoke-Setup {
+    $root=if($GameRoot){$GameRoot}else{if(-not $SteamRoot){$script:SteamRoot=Find-SteamRoot};Find-SteamGame $SteamRoot}
+    $root=[IO.Path]::GetFullPath($root);Assert-RegularPath $root
+    $targets=@(foreach($sub in @('_windows\win64','_windowsnosteam\win64')) {
+        $dir=Join-Path $root $sub;$exe=Join-Path $dir 'Darkest.exe'
+        if(Test-Path -LiteralPath $exe){Assert-RegularPath $dir;Assert-RegularPath $exe;Assert-GameExecutable $exe;$dir}
+    })
+    if(-not $targets.Count){throw 'No _windows/win64 or _windowsnosteam/win64 game found.'}
+    $names=@('dd_engine_patch.asi','winmm.ini','winmm.dll')
+    $proxyHash=(Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'winmm.dll')).Hash
+    $legacy=@(Get-LegacyInstalls $root)
+    $details=@(foreach($dir in $targets){
+        $plugin=Join-Path $dir 'dd_engine_patch.asi';$proxy=Join-Path $dir 'winmm.dll'
+        Assert-RegularPath $plugin;Assert-RegularPath $proxy
+        $ours=Test-OurPlugin $plugin
+        if((Test-Path -LiteralPath $plugin) -and -not $ours){throw ('Unrecognized plugin, refusing to overwrite: '+$plugin)}
+        $configuration=Join-Path $dir 'winmm.ini'
+        Assert-RegularPath $configuration
+        if((Test-Path -LiteralPath $configuration) -and -not $ours){throw ('Existing WinMM configuration belongs to another installation: '+$configuration)}
+        $hasProxy=Test-Path -LiteralPath $proxy
+        if($hasProxy -and (-not $ours -or (Get-FileHash -LiteralPath $proxy).Hash -cne $proxyHash)){throw ('Existing WinMM proxy belongs to another installation: '+$proxy)}
+        [ordered]@{directory=$dir;installed=($ours -and $hasProxy -and (Test-Path -LiteralPath $configuration))}
+    })
+    if($Action -in @('Status','Preview')){return [ordered]@{targets=$details;legacy_installations=$legacy.Count;files=$names}}
+    Assert-GameStopped
+    if($legacy.Count -and (Get-Process -Name steam -ErrorAction SilentlyContinue)){throw 'Exit Steam normally once to migrate the old launch options.'}
+    if($Action -eq 'Install' -and -not(Test-OurPlugin (Join-Path $PSScriptRoot $names[0]))){throw 'Invalid patch payload.'}
+    $saved=@{};$touched=New-Object 'Collections.Generic.List[string]'
+    function Save-Before([string]$Path){
+        Assert-RegularPath $Path
+        if(-not $saved.ContainsKey($Path)){$saved[$Path]=if(Test-Path -LiteralPath $Path){[IO.File]::ReadAllBytes($Path)}else{$null};$touched.Add($Path)}
     }
     try {
-        foreach ($name in $names) {
-            $source = Join-Path $PSScriptRoot $name; $destination = Join-Path $InstallRoot $name
-            if ([IO.Path]::GetFullPath($source) -ine $destination) { Copy-Item -LiteralPath $source -Destination $destination -Force }
-            if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash) { throw ('Patch copy SHA256 mismatch: '+$name) }
+        foreach($dir in $targets){
+            foreach($name in $(if($Action -eq 'Uninstall'){@('winmm.dll','dd_engine_patch.asi','winmm.ini')}else{$names})){
+                $path=Join-Path $dir $name;Save-Before $path
+                if($Action -eq 'Uninstall'){if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path}}
+                else {
+                    $source=Join-Path $PSScriptRoot $name
+                    Write-AtomicBytes $path ([IO.File]::ReadAllBytes($source))
+                    if((Get-FileHash -LiteralPath $path).Hash -cne (Get-FileHash -LiteralPath $source).Hash){throw 'Patch copy checksum mismatch.'}
+                }
+            }
         }
-        $info = [Diagnostics.ProcessStartInfo]::new(); $info.FileName=$launcher
-        $info.Arguments='--game "'+$game+'" --check'; $info.UseShellExecute=$false; $info.WorkingDirectory=$InstallRoot
-        $process = [Diagnostics.Process]::new(); $process.StartInfo=$info
-        try { if(-not $process.Start()){throw 'Native check failed to start.'};$process.WaitForExit();if($process.ExitCode -ne 0){throw 'Native executable format check failed.'} } finally {$process.Dispose()}
-        $newState = [ordered]@{version=1;app_id='262060';localconfig=$config;previous_launch_options=$previous;launch_options=$options;game=$game;runtime_python_required=$false}
-        Write-AtomicBytes $statePath ([Text.UTF8Encoding]::new($false).GetBytes(($newState|ConvertTo-Json -Depth 3)))
-        Assert-SteamStopped
-        Write-SteamConfig $config $before $options
+        foreach($old in $legacy){
+            if(Get-Process -Name steam -ErrorAction SilentlyContinue){throw 'Steam restarted during migration.'}
+            Save-Before $old.Config
+            Write-SteamConfig $old.Config $old.Before $old.Previous
+            foreach($name in @('dd_windows_launcher.exe','dd_skin_rig_patch.dll','steam_install.json','windows_launch.log')){
+                $path=Join-Path $old.Folder $name
+                if(Test-Path -LiteralPath $path){Save-Before $path;Remove-Item -LiteralPath $path}
+            }
+            $log=Join-Path (Split-Path -Parent $old.Folder) 'setup.log'
+            if(Test-Path -LiteralPath $log){Save-Before $log;Remove-Item -LiteralPath $log}
+        }
     } catch {
-        foreach ($name in $names) {
-            $destination=Join-Path $InstallRoot $name
-            if ($null -ne $saved[$name]) { [IO.File]::WriteAllBytes($destination,$saved[$name]) }
-            elseif (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination }
+        for($i=$touched.Count-1;$i -ge 0;$i--){
+            $path=$touched[$i]
+            if($null -eq $saved[$path]){if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path}}
+            else{Write-AtomicBytes $path $saved[$path]}
         }
-        if ($stateBytes) { Write-AtomicBytes $statePath $stateBytes }
-        elseif (Test-Path -LiteralPath $statePath) { Remove-Item -LiteralPath $statePath }
         throw
     }
-    return [ordered]@{enabled=$true;localconfig=$config;launch_options=$options;install_root=$InstallRoot;runtime_python_required=$false;log=(Join-Path $InstallRoot 'windows_launch.log')}
+    return [ordered]@{installed=($Action -eq 'Install');targets=$targets;files=$names;migrated=$legacy.Count}
 }
 if ($MyInvocation.InvocationName -ne '.') {
-    try { Invoke-SteamSetup | ConvertTo-Json -Depth 4 }
-    catch { Write-Host ('Steam patch setup: '+$_.Exception.Message); exit 1 }
+    try { Invoke-Setup | ConvertTo-Json -Depth 5 }
+    catch { Write-Output ('Patch setup: '+$_.Exception.Message); exit 1 }
 }

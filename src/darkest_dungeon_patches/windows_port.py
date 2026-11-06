@@ -9,7 +9,8 @@ import tempfile
 from pathlib import Path
 
 from .address_scan import check_instructions, read_image, resolve, signatures
-from .paths import COMMON_NATIVE, WINDOWS_NATIVE, WINDOWS_SCRIPTS
+from .paths import COMMON_NATIVE, PATCH_ROOT, WINDOWS_NATIVE, WINDOWS_SCRIPTS
+from .windows_proxy import acquire
 
 HERE = WINDOWS_NATIVE
 
@@ -62,7 +63,7 @@ def validate(game: Path):
     }
 
 
-def compile_binaries(output: Path, compiler: str | None = None):
+def compile_binaries(output: Path, compiler: str | None = None, proxy: Path | None = None):
     """Compile distributable binaries without requiring commercial game files."""
     compiler = compiler or shutil.which("x86_64-w64-mingw32-clang")
     if not compiler:
@@ -80,12 +81,10 @@ def compile_binaries(output: Path, compiler: str | None = None):
         "-I",
         str(WINDOWS_NATIVE),
     ]
-    launcher = output / "dd_windows_launcher.exe"
-    library = output / "dd_skin_rig_patch.dll"
-    subprocess.run(
-        [*common, "-municode", str(HERE / "windows_launcher.c"), "-o", str(launcher)],
-        check=True,
-    )
+    proxy = acquire(output / "winmm.dll", proxy)
+    configuration = output / "winmm.ini"
+    shutil.copyfile(WINDOWS_SCRIPTS / "winmm.ini", configuration)
+    library = output / "dd_engine_patch.asi"
     subprocess.run(
         [*common, "-shared", str(COMMON_NATIVE / "skin_rig_patch.c"), "-lm", "-o", str(library)],
         check=True,
@@ -95,9 +94,11 @@ def compile_binaries(output: Path, compiler: str | None = None):
         temporary = Path(directory)
         header = []
         for name, payload in (
-            ("setup_script", (WINDOWS_SCRIPTS / "windows_steam.ps1").read_bytes()),
-            ("setup_launcher", launcher.read_bytes()),
+            ("setup_script", (WINDOWS_SCRIPTS / "windows_install.ps1").read_bytes()),
+            ("setup_proxy", proxy.read_bytes()),
+            ("setup_config", configuration.read_bytes()),
             ("setup_library", library.read_bytes()),
+            ("setup_license", (PATCH_ROOT / "licenses/ultimate_asi_loader.txt").read_bytes()),
         ):
             rows = [
                 ",".join(f"0x{byte:02x}" for byte in payload[i : i + 32])
@@ -142,12 +143,17 @@ def compile_binaries(output: Path, compiler: str | None = None):
             ],
             check=True,
         )
-    return {"launcher": str(launcher), "library": str(library), "setup": str(setup)}
+    return {
+        "proxy": str(proxy),
+        "configuration": str(configuration),
+        "library": str(library),
+        "setup": str(setup),
+    }
 
 
-def build(game: Path, compiler: str | None = None):
+def build(game: Path, compiler: str | None = None, proxy: Path | None = None):
     result = validate(game)
     output = Path(tempfile.mkdtemp(prefix="dd-windows-build-"))
-    result.update(compile_binaries(output, compiler))
+    result.update(compile_binaries(output, compiler, proxy))
     result["check_only"] = True
     return result

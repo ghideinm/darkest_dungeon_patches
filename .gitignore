@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.so
 *.dll
+*.asi
 *.exe
 *.o
 *.log

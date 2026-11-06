@@ -16,7 +16,9 @@ from .windows_port import compile_binaries
 HERE = PATCH_ROOT
 
 
-def build(output: Path | None = None, windows_cc: str | None = None):
+def build(
+    output: Path | None = None, windows_cc: str | None = None, windows_proxy: Path | None = None
+):
     if platform.system() != "Linux" or platform.machine().lower() not in ("x86_64", "amd64"):
         raise RuntimeError("Combined release build requires a Linux x86-64 host")
     root = Path(output) if output else Path(tempfile.mkdtemp(prefix="dd-release-"))
@@ -38,8 +40,11 @@ def build(output: Path | None = None, windows_cc: str | None = None):
             [*common, "-fPIC", "-shared", str(source), "-ldl", "-lm", "-o", str(root / name)],
             check=True,
         )
-    windows = compile_binaries(root, windows_cc)
+    windows = compile_binaries(root, windows_cc, windows_proxy)
     shutil.copyfile(HERE / "README.md", root / "README.md")
+    shutil.copyfile(
+        HERE / "licenses/ultimate_asi_loader.txt", root / "ultimate_asi_loader_license.txt"
+    )
     files = sorted(path for path in root.iterdir() if path.is_file())
     (root / "SHA256SUMS").write_text(
         "".join(
