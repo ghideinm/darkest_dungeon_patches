@@ -1,0 +1,61 @@
+<?xml version='1.0' encoding='utf-8'?>
+<project>
+  <!-- 上传前将 ModDataPath 设为发布包 content 目录的 Windows 实际路径；不要指向整个仓库。 -->
+  <!-- PublishedFileId 对应现有工坊条目，后续更新时保留，避免重复创建。 -->
+  <PreviewIconFile>preview_icon.png</PreviewIconFile>
+  <ItemDescriptionShort>32 MiB 资源读取、原生分辨率画布、按皮肤 Mod 来源动态加载骨架。需手动安装一次。</ItemDescriptionShort>
+  <ModDataPath>./content/</ModDataPath>
+  <Title>暗黑地牢引擎补丁 | Darkest Dungeon Patches</Title>
+  <Language>schinese</Language>
+  <UpdateDetails>v1.1.0：Windows x64 WinMM 代理自动加载；最小安装；三项补丁与跨平台安装、卸载说明。</UpdateDetails>
+  <Visibility>public</Visibility>
+  <UploadMode>direct_upload</UploadMode>
+  <VersionMajor>1</VersionMajor>
+  <VersionMinor>1</VersionMinor>
+  <TargetBuild>0</TargetBuild>
+  <Tags>
+    <Tags>Utilities</Tags>
+    <Tags>Gameplay Tweaks</Tags>
+  </Tags>
+  <ItemDescription>[h1]暗黑地牢引擎补丁[/h1]
+为《暗黑地牢》原生 Linux x86-64 与 Windows x64 提供三项引擎补丁：
+[list]
+[*]资源读取缓冲扩大至 32 MiB，支持较大的 Mod 资源。
+[*]原生分辨率画布，改善高分辨率下的人物显示。
+[*]根据当前皮肤的实际 Mod 来源加载骨架，区分不同来源的同名骨架。
+[/list]
+[b]这是引擎补丁，不包含封面中展示的皮肤资源。所需皮肤 Mod 请另外安装并启用。[/b]
+
+[h1]安装一次，以后正常启动[/h1]
+[b]仅订阅本条目或在存档中勾选它不会完成安装。请先按下面的方式安装补丁。[/b]
+
+[h2]Windows x64[/h2]
+1. 正常退出游戏。在本条目的下载目录中运行 dd_patch_setup.exe。
+2. 安装器会定位游戏，向已有的 _windows/win64 和 _windowsnosteam/win64 目录各安装 winmm.dll、dd_engine_patch.asi、winmm.ini。
+3. 安装完成后直接从 Steam 或原游戏 EXE 启动；无需 Steam 启动参数，也无需再次运行安装器。
+4. 若自动定位失败，可在 PowerShell 中指定游戏根目录：
+[code].\dd_patch_setup.exe --game-root "D:\SteamLibrary\steamapps\common\DarkestDungeon"[/code]
+
+Windows 仅支持上述两个目录的 x64 入口。首次从旧版启动器迁移时，请先正常退出 Steam。补丁默认不写磁盘日志，代理日志和崩溃转储也已关闭。
+
+[h2]Linux x86-64[/h2]
+1. 使用原生 Linux 游戏，关闭强制 Proton。
+2. 将下载目录里的 libdd_resource_loading_patch.so 和 libdd_skin_rig_patch.so 复制到固定目录。
+3. 按随包 README.md 的 Linux 安装步骤，在 Steam 启动选项中填写 LD_PRELOAD 和补丁环境变量。以后直接从 Steam 启动。
+
+安装后的补丁保存在游戏目录或自行指定的固定目录中；取消订阅本条目不会卸载它。更新时也需要替换 SO 或重新运行新版安装器。
+
+[h1]卸载[/h1]
+[b]Windows：[/b]正常退出游戏，运行 dd_patch_setup.exe --uninstall；或手动删除两个 x64 入口中安装的 winmm.dll、dd_engine_patch.asi 和 winmm.ini。
+[b]Linux：[/b]正常退出游戏，恢复原来的 Steam 启动选项，移除本补丁的环境变量和两个 SO 路径，之后可删除这两个 SO。
+
+[h1]下载、源码与反馈[/h1]
+[url=https://github.com/ghideinm/darkest_dungeon_patches/releases/tag/v1.1.0]v1.1.0 发布包[/url]
+[url=https://space.bilibili.com/398692528][img]https://static.hdslb.com/images/favicon.png[/img][/url] [url=https://space.bilibili.com/398692528]作者 B站主页[/url]
+[url=https://github.com/ghideinm/darkest_dungeon_patches][img]https://github.githubassets.com/favicons/favicon.png[/img][/url] [url=https://github.com/ghideinm/darkest_dungeon_patches]GitHub 项目、源码与问题反馈[/url]
+
+实验版本。Linux 与 Windows 已实机验证；游戏更新后会继续尝试按唯一特征定位，指令不兼容时跳过补丁。Windows 初始化检查失败时保留未修改的游戏代码。
+
+本补丁并非 Red Hook Studios 的官方产品或官方修改，Red Hook Studios Inc. 不对使用本补丁产生的更改或损害负责。《Darkest Dungeon》及其标志为 Red Hook Studios Inc. 的商标，游戏内容版权归 Red Hook Studios Inc. 所有。</ItemDescription>
+  <PublishedFileId>3834562187</PublishedFileId>
+</project>
