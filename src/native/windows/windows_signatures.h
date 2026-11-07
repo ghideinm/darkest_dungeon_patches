@@ -79,8 +79,11 @@ static const DdSignature dd_signatures[] = {
     {"native_new",
      "40 53 55 56 57 48 83 ec 38 0f b6 f2 48 8b d9 48 8b 41 08 48 39 01 75 ??",
      DD_NATIVE_NEW, 4, 0, 0, 0, 1},
+    /* A crash-fix detour can replace seven bytes after this prologue. Match
+     * stable code on both sides while keeping the original entry guard. */
     {"set_animation",
-     "40 53 55 56 57 41 54 41 55 41 56 41 57 48 83 ec 28 48 8b 41 28 48 8b da",
+     "40 53 55 56 57 41 54 41 55 41 56 41 57 48 83 ec 28 ?? ?? ?? ?? ?? ?? ?? "
+     "48 8b 51 20 49 bd ab aa aa aa aa aa aa aa 48 2b c2",
      DD_SET_ANIMATION, 4, 0, 0, 0, 1},
     {"animation_length",
      "40 53 55 56 57 48 83 ec 28 48 8b 41 28 48 8b da 48 8b 51 20 48 bd ab aa",

@@ -7,8 +7,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from darkest_dungeon_patches.address_scan import ImageRange, Signature, resolve, signatures
+from darkest_dungeon_patches.address_scan import (
+    ImageRange,
+    Signature,
+    check_instructions,
+    resolve,
+    signatures,
+)
 from darkest_dungeon_patches.paths import COMMON_NATIVE
+from darkest_dungeon_patches.windows_port import profile
 
 
 class NativeRange(ctypes.Structure):
@@ -190,6 +197,54 @@ int scan(const DdRange *ranges, size_t count, const DdSignature *feature,
                 ),
                 (-1, 0xFEED),
             )
+
+    @staticmethod
+    def animation_entry(detour=None):
+        # Hand-assembled scan-only instructions; no game files or execution.
+        prologue = bytes.fromhex("40 53 55 56 57 41 54 41 55 41 56 41 57 48 83 ec 28")
+        original = bytes.fromhex("48 8b 41 28 48 8b da")
+        relocated = (
+            original if detour is None else b"\xe9" + struct.pack("<i", detour) + b"\x90\x90"
+        )
+        body = (
+            bytes.fromhex("48 8b 51 20 49 bd")
+            + struct.pack("<Q", 0xAAAAAAAAAAAAAAAB)
+            + bytes.fromhex("48 2b c2 c3")
+        )
+        return prologue + relocated + body
+
+    def test_windows_animation_entry_survives_optional_crash_fix_and_relocation(self):
+        feature = next(entry for entry in signatures("windows") if entry.symbol == "SET_ANIMATION")
+        guard = next(entry for entry in profile()["api"] if entry[0] == feature.symbol)
+        for address, detour in ((0x8100, None), (0x910000, 0x123456), (0x280000, -0x4567)):
+            with self.subTest(address=address, detour=detour):
+                raw = self.animation_entry(detour)
+                ranges = [ImageRange(address - 32, b"\xcc" * 32 + raw + b"\xcc" * 32, 128, 5)]
+                expected = {"SET_ANIMATION": address}
+                self.assertEqual(self.native(ranges, feature), (1, address))
+                self.assertEqual(resolve(ranges, [feature]), (expected, []))
+                self.assertEqual(check_instructions(ranges, expected, [guard]), [])
+
+    def test_windows_animation_entry_keeps_surrounding_context_required(self):
+        feature = next(entry for entry in signatures("windows") if entry.symbol == "SET_ANIMATION")
+        for detour in (None, 0x123456):
+            for offset in (0, 24):
+                with self.subTest(detour=detour, offset=offset):
+                    raw = bytearray(self.animation_entry(detour))
+                    raw[offset] ^= 1
+                    ranges = [ImageRange(0x8100, bytes(raw), len(raw), 5)]
+                    self.assertEqual(self.native(ranges, feature), (0, 0xFEED))
+                    self.assertTrue(resolve(ranges, [feature])[1])
+
+    def test_windows_animation_entry_rejects_mixed_duplicate_code_matches(self):
+        feature = next(entry for entry in signatures("windows") if entry.symbol == "SET_ANIMATION")
+        original, patched = self.animation_entry(), self.animation_entry(0x123456)
+        ranges = [
+            ImageRange(0x8100, original, len(original), 5),
+            ImageRange(0x910000, patched, len(patched), 7),
+        ]
+        self.assertEqual(self.native(ranges, feature), (2, 0xFEED))
+        self.assertEqual(resolve(ranges, [feature]), ({}, ["SET_ANIMATION: matches=2"]))
 
     def test_shipping_profiles_have_bounded_masked_unique_symbol_definitions(self):
         for platform in ("linux", "windows"):
