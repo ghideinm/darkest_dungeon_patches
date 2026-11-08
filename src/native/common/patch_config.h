@@ -28,7 +28,7 @@ typedef struct {
   char log_file[4096];
   int hide_vanilla_skins;
 } DdPatchConfig;
-static DdPatchConfig dd_config = {32, 16, 0, "dd_engine_patch.log", 0};
+static DdPatchConfig dd_config = {32, 16, 0, "dd_engine_patch.log", 1};
 static int dd_config_initialized;
 static FILE *dd_log_file;
 

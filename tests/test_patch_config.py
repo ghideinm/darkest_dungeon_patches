@@ -162,10 +162,13 @@ int main(void) {
             root = Path(directory)
             binary = self.compile(root)
             config = root / "dd_engine_patch.ini"
+            self.assertIn("hide_vanilla_skins=1", self.run_fixture(binary, root).stderr)
+            config.write_text("[skins]\n")
+            self.assertIn("hide_vanilla_skins=1", self.run_fixture(binary, root).stderr)
             for value in ("0", "1", "2", "-1", "true"):
                 config.write_text("[skins]\nhide_vanilla_skins=" + value + "\n")
                 result = self.run_fixture(binary, root)
-                self.assertIn("hide_vanilla_skins=" + ("1" if value == "1" else "0"), result.stderr)
+                self.assertIn("hide_vanilla_skins=" + ("0" if value == "0" else "1"), result.stderr)
                 self.assertEqual(
                     "DD_PATCH_CONFIG_INVALID" in result.stderr, value not in ("0", "1")
                 )
