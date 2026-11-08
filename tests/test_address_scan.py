@@ -246,6 +246,41 @@ int scan(const DdRange *ranges, size_t count, const DdSignature *feature,
         self.assertEqual(self.native(ranges, feature), (2, 0xFEED))
         self.assertEqual(resolve(ranges, [feature]), ({}, ["SET_ANIMATION: matches=2"]))
 
+    def test_windows_resource_pool_requires_verified_ownership_layout_and_count(self):
+        address, allocator = 0x9100, 0xA100
+        loop = (
+            b"\xb9"
+            + struct.pack("<I", 0x1000000)
+            + b"\xff\x15"
+            + struct.pack("<i", allocator - address - 11)
+            + bytes.fromhex(
+                "48 89 44 de 20 48 8d 56 20 48 8d 14 da 48 8d 8e 80 00 00 00 "
+                "e8 00 00 00 00 48 ff c3 48 83 fb 0c 75 d3"
+            )
+        )
+        features = [
+            entry
+            for entry in signatures("windows")
+            if entry.symbol in ("RESOURCE_0", "RESOURCE_ALLOCATOR")
+        ]
+        ranges = [ImageRange(address, loop, len(loop), 5), ImageRange(allocator, b"\0" * 8, 8, 6)]
+        self.assertEqual(
+            resolve(ranges, features),
+            ({"RESOURCE_0": address, "RESOURCE_ALLOCATOR": allocator}, []),
+        )
+        for feature in features:
+            expected = allocator if feature.symbol == "RESOURCE_ALLOCATOR" else address
+            self.assertEqual(self.native(ranges, feature), (1, expected))
+        # A different owning field, free queue, or pool size must refuse the
+        # hooks rather than using stale structure offsets or scanning 12 slots.
+        for offset in (15, 27, 42):
+            changed = bytearray(loop)
+            changed[offset] ^= 1
+            ranges[0] = ImageRange(address, bytes(changed), len(changed), 5)
+            for feature in features:
+                self.assertEqual(self.native(ranges, feature), (0, 0xFEED))
+            self.assertEqual(len(resolve(ranges, features)[1]), 2)
+
     def test_shipping_profiles_have_bounded_masked_unique_symbol_definitions(self):
         for platform in ("linux", "windows"):
             features = signatures(platform)

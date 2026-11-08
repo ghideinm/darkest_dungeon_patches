@@ -3,11 +3,14 @@
 #include "../common/address_profile.h"
 #include <stdlib.h>
 #include <windows.h>
-enum { DD_IMAGE_RANGES = 96 };
+/* Windows' PE loader supports at most 96 sections. A section can contain an
+ * unbounded number of VirtualQuery regions after copy-on-write page changes.
+ */
+enum { DD_PE_SECTIONS = 96 };
 typedef struct {
-  DdRange ranges[DD_IMAGE_RANGES];
-  unsigned char *owned[DD_IMAGE_RANGES];
-  size_t count;
+  DdRange *ranges;
+  unsigned char *owned[DD_PE_SECTIONS];
+  size_t count, capacity, owned_count;
   void *view;
   HANDLE mapping;
 } DdWindowsImage;
@@ -23,15 +26,47 @@ static inline int dd_windows_pe(const IMAGE_NT_HEADERS64 *pe) {
          pe->FileHeader.SizeOfOptionalHeader ==
              sizeof(IMAGE_OPTIONAL_HEADER64) &&
          pe->FileHeader.NumberOfSections > 0 &&
-         pe->FileHeader.NumberOfSections <= 32;
+         pe->FileHeader.NumberOfSections <= DD_PE_SECTIONS;
 }
 static inline void dd_windows_image_close(DdWindowsImage *image) {
-  for (size_t i = 0; i < image->count; ++i)
+  for (size_t i = 0; i < image->owned_count; ++i)
     free(image->owned[i]);
+  free(image->ranges);
   if (image->view)
     UnmapViewOfFile(image->view);
   if (image->mapping)
     CloseHandle(image->mapping);
+  memset(image, 0, sizeof(*image));
+}
+static inline int dd_windows_add_range(DdWindowsImage *image, DdRange range) {
+  if (image->count == image->capacity) {
+    size_t capacity = image->capacity ? image->capacity * 2 : 8;
+    if (capacity < image->capacity ||
+        capacity > SIZE_MAX / sizeof(*image->ranges))
+      return 0;
+    void *grown = realloc(image->ranges, capacity * sizeof(*image->ranges));
+    if (!grown)
+      return 0;
+    image->ranges = grown;
+    image->capacity = capacity;
+  }
+  image->ranges[image->count++] = range;
+  return 1;
+}
+static inline int dd_windows_add_loaded_range(DdWindowsImage *image,
+                                              DdRange range) {
+  if (image->count) {
+    DdRange *previous = image->ranges + image->count - 1;
+    if (previous->flags == range.flags &&
+        previous->size == previous->memory_size &&
+        previous->address + previous->size == range.address &&
+        previous->bytes + previous->size == range.bytes) {
+      previous->size += range.size;
+      previous->memory_size += range.memory_size;
+      return 1;
+    }
+  }
+  return dd_windows_add_range(image, range);
 }
 static inline int dd_windows_file_image(HANDLE file, DdWindowsImage *image) {
   LARGE_INTEGER size;
@@ -66,9 +101,11 @@ static inline int dd_windows_file_image(HANDLE file, DdWindowsImage *image) {
                                                            : s->SizeOfRawData;
     if ((uint64_t)s->VirtualAddress + memory > pe->OptionalHeader.SizeOfImage)
       return 0;
-    image->ranges[image->count++] = (DdRange){
-        bytes + s->PointerToRawData, s->SizeOfRawData, s->VirtualAddress,
-        memory, dd_section_flags(s->Characteristics)};
+    if (!dd_windows_add_range(
+            image, (DdRange){bytes + s->PointerToRawData, s->SizeOfRawData,
+                             s->VirtualAddress, memory,
+                             dd_section_flags(s->Characteristics)}))
+      return 0;
   }
   return 1;
 }
@@ -76,7 +113,7 @@ static inline int dd_windows_remote_image(HANDLE process, uintptr_t base,
                                           DdWindowsImage *image) {
   IMAGE_DOS_HEADER dos;
   IMAGE_NT_HEADERS64 pe;
-  IMAGE_SECTION_HEADER sections[32];
+  IMAGE_SECTION_HEADER sections[DD_PE_SECTIONS];
   SIZE_T read;
   if (!ReadProcessMemory(process, (void *)base, &dos, sizeof(dos), &read) ||
       read != sizeof(dos) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
@@ -97,19 +134,21 @@ static inline int dd_windows_remote_image(HANDLE process, uintptr_t base,
     if ((uint64_t)s->VirtualAddress + memory > pe.OptionalHeader.SizeOfImage)
       return 0;
     unsigned flags = dd_section_flags(s->Characteristics);
+    unsigned char *owned = NULL;
     if (flags & DD_CODE) {
-      image->owned[i] = malloc(memory);
+      owned = malloc(memory);
       /* Include the allocation in cleanup even when the read fails. */
-      image->count = i + 1;
-      if (!image->owned[i] ||
-          !ReadProcessMemory(process, (void *)(base + s->VirtualAddress),
-                             image->owned[i], memory, &read) ||
+      image->owned[image->owned_count++] = owned;
+      if (!owned ||
+          !ReadProcessMemory(process, (void *)(base + s->VirtualAddress), owned,
+                             memory, &read) ||
           read != memory)
         return 0;
     }
-    image->ranges[i] = (DdRange){image->owned[i], flags & DD_CODE ? memory : 0,
-                                 s->VirtualAddress, memory, flags};
-    image->count = i + 1;
+    if (!dd_windows_add_range(image,
+                              (DdRange){owned, flags & DD_CODE ? memory : 0,
+                                        s->VirtualAddress, memory, flags}))
+      return 0;
   }
   return 1;
 }
@@ -140,11 +179,11 @@ static inline int dd_windows_loaded_image(uintptr_t base,
         next = end;
       if (region.State == MEM_COMMIT &&
           !(region.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
-        if (image->count == DD_IMAGE_RANGES)
+        if (!dd_windows_add_loaded_range(
+                image,
+                (DdRange){(const void *)at, next - at, at - base, next - at,
+                          dd_section_flags(s->Characteristics)}))
           return 0;
-        image->ranges[image->count++] =
-            (DdRange){(const void *)at, next - at, at - base, next - at,
-                      dd_section_flags(s->Characteristics)};
       }
       at = next;
     }

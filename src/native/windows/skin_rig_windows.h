@@ -280,11 +280,15 @@ static int windows_guard_sites(const DdWindowsImage *image,
     if (!dd_contains(image->ranges, image->count, address - base, site->length,
                      DD_CODE) ||
         !dd_guard((void *)address, site->expected, site->length, address,
-                  native_address(DD_NATIVE_NEW)))
+                  native_address(DD_NATIVE_NEW))) {
+      dprintf(2, "DD_PATCH_GUARD_FAILED symbol=%u address=%p\n",
+              (unsigned)site->symbol, (void *)address);
       return 0;
+    }
   }
   return 1;
 }
+#include "windows_resource.h"
 static int windows_rig_plan(DdWindowsPatches *plan, unsigned char **allocated) {
   runtime_enabled = 1;
   preserve_palette_sources = 1;
@@ -363,6 +367,20 @@ static void windows_initialize_patch(void) {
   if (InterlockedCompareExchange(&dd_patch_status.state, 1, 0))
     return;
   dd_runtime_init((const void *)windows_initialize_patch);
+  wchar_t wide[4096];
+  char executable[4096] = "unknown", working[4096] = "unknown";
+  DWORD length = GetModuleFileNameW(NULL, wide, 4096);
+  if (length && length < 4096 &&
+      !WideCharToMultiByte(CP_UTF8, 0, wide, -1, executable, sizeof(executable),
+                           NULL, NULL))
+    strcpy(executable, "unknown");
+  length = GetCurrentDirectoryW(4096, wide);
+  if (length && length < 4096 &&
+      !WideCharToMultiByte(CP_UTF8, 0, wide, -1, working, sizeof(working), NULL,
+                           NULL))
+    strcpy(working, "unknown");
+  dprintf(2, "DD_PATCH_PROCESS pid=%lu executable=%s cwd=%s\n",
+          (unsigned long)GetCurrentProcessId(), executable, working);
   base = (uintptr_t)GetModuleHandleW(NULL);
   unsigned groups =
       (windows_option("DD_LOADBUFFER_PATCH") ? DD_GROUP_RESOURCE : 0) |
@@ -392,20 +410,13 @@ static void windows_initialize_patch(void) {
 #undef CHECK_SITES
   DdWindowsPatches plan = {0};
   unsigned char *stubs = NULL;
+  unsigned char *resource_stubs = NULL;
   dd_patch_status.error = 3;
   if ((groups & DD_GROUP_RIG) && !windows_rig_plan(&plan, &stubs))
     goto rollback;
-  if (groups & DD_GROUP_RESOURCE) {
-    const uint32_t cap = dd_resource_buffer_bytes();
-    for (size_t i = 0; i < sizeof(windows_resource_sites) / sizeof(WindowsSite);
-         ++i) {
-      const WindowsSite *site = windows_resource_sites + i;
-      if (!windows_plan_edit(
-              &plan, (void *)(native_address(site->symbol) + site->operand),
-              &cap, sizeof(cap)))
-        goto rollback;
-    }
-  }
+  if ((groups & DD_GROUP_RESOURCE) &&
+      !windows_resource_plan(&plan, &resource_stubs))
+    goto rollback;
   if (groups & DD_GROUP_RENDER)
     for (size_t i = 0; i < sizeof(windows_render_sites) / sizeof(WindowsSite);
          ++i) {
@@ -421,12 +432,19 @@ static void windows_initialize_patch(void) {
   dd_patch_status.error = 0;
   InterlockedExchange(&dd_windows_ready, 1);
   InterlockedExchange(&dd_patch_status.state, 2);
+  dd_windows_image_close(&image);
   dprintf(2, "DD_PATCH_APPLIED groups=%u platform=windows_x64\n", groups);
   return;
 rollback:
+  if (resource_stubs)
+    (void)VirtualFree(resource_stubs, 0, MEM_RELEASE);
   if (stubs)
     (void)VirtualFree(stubs, 0, MEM_RELEASE);
 refused:
+  dd_windows_image_close(&image);
+  dprintf(2, "DD_PATCH_REFUSED stage=%lu requested=%lu\n",
+          (unsigned long)dd_patch_status.error,
+          (unsigned long)dd_patch_status.requested);
   InterlockedExchange(&dd_patch_status.state, -1);
 }
 /* ASI loaders may call this after LoadLibrary; initialization is idempotent. */

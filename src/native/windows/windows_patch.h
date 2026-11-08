@@ -1,8 +1,11 @@
 #ifndef DD_WINDOWS_PATCH_H
 #define DD_WINDOWS_PATCH_H
-#include <stdint.h>
-#include <string.h>
 #include <windows.h>
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <tlhelp32.h>
 
 enum { DD_WINDOWS_EDITS = 16, DD_WINDOWS_PAGES = 32 };
 typedef struct {
@@ -48,7 +51,7 @@ static int windows_restore_pages(const DdWindowsPatches *plan, size_t count) {
   }
   return valid;
 }
-static int windows_commit(DdWindowsPatches *plan) {
+static int windows_write_plan(DdWindowsPatches *plan) {
   SYSTEM_INFO info;
   GetSystemInfo(&info);
   plan->page_size = info.dwPageSize;
@@ -107,5 +110,108 @@ static int windows_commit(DdWindowsPatches *plan) {
     }
   (void)windows_restore_pages(plan, plan->page_count);
   return 0;
+}
+
+typedef struct {
+  HANDLE handle;
+  int suspended;
+} DdWindowsThread;
+typedef struct {
+  DdWindowsThread *threads;
+  size_t count, capacity;
+} DdWindowsThreads;
+
+static void windows_resume_threads(DdWindowsThreads *peers) {
+  for (size_t i = 0; i < peers->count; ++i) {
+    if (peers->threads[i].suspended)
+      (void)ResumeThread(peers->threads[i].handle);
+    CloseHandle(peers->threads[i].handle);
+  }
+  free(peers->threads);
+}
+
+/* A generic DLL loader can enter while the main thread is already reading
+ * resources. Freeze peers for the guarded write/rollback only. Collect handles
+ * and allocate storage first: never enter the C heap while peers are stopped.
+ */
+static int windows_suspend_threads(const DdWindowsPatches *plan,
+                                   DdWindowsThreads *peers) {
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snapshot == INVALID_HANDLE_VALUE)
+    return 0;
+  THREADENTRY32 entry = {0};
+  entry.dwSize = sizeof(entry);
+  DWORD process = GetCurrentProcessId(), current = GetCurrentThreadId();
+  int valid = Thread32First(snapshot, &entry) != 0;
+  while (valid) {
+    if (entry.th32OwnerProcessID == process && entry.th32ThreadID != current) {
+      if (peers->count == peers->capacity) {
+        size_t capacity = peers->capacity ? peers->capacity * 2 : 8;
+        if (capacity < peers->capacity ||
+            capacity > SIZE_MAX / sizeof(*peers->threads)) {
+          valid = 0;
+          break;
+        }
+        void *grown =
+            realloc(peers->threads, capacity * sizeof(*peers->threads));
+        if (!grown) {
+          valid = 0;
+          break;
+        }
+        peers->threads = grown;
+        peers->capacity = capacity;
+      }
+      HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
+                                     THREAD_QUERY_LIMITED_INFORMATION,
+                                 FALSE, entry.th32ThreadID);
+      if (!thread) {
+        /* A thread that exited since the snapshot no longer needs freezing. */
+        if (GetLastError() != ERROR_INVALID_PARAMETER) {
+          valid = 0;
+          break;
+        }
+      } else
+        peers->threads[peers->count++] = (DdWindowsThread){thread, 0};
+    }
+    if (!Thread32Next(snapshot, &entry)) {
+      valid = GetLastError() == ERROR_NO_MORE_FILES;
+      break;
+    }
+  }
+  CloseHandle(snapshot);
+  if (!valid)
+    return 0;
+  for (size_t i = 0; i < peers->count; ++i) {
+    DdWindowsThread *thread = peers->threads + i;
+    if (SuspendThread(thread->handle) == (DWORD)-1) {
+      DWORD exit_code;
+      if (GetExitCodeThread(thread->handle, &exit_code) &&
+          exit_code != STILL_ACTIVE)
+        continue;
+      return 0;
+    }
+    thread->suspended = 1;
+    CONTEXT context = {0};
+    context.ContextFlags = CONTEXT_CONTROL;
+    if (!GetThreadContext(thread->handle, &context))
+      return 0;
+    for (size_t j = 0; j < plan->count; ++j) {
+      uintptr_t start = (uintptr_t)plan->edits[j].address;
+      /* At the first byte the incoming state also fits the replacement. A
+       * thread midway through a replaced prologue must finish before retry.
+       */
+      if (context.Rip > start && context.Rip < start + plan->edits[j].length)
+        return 0;
+    }
+  }
+  return 1;
+}
+
+static int windows_commit(DdWindowsPatches *plan) {
+  DdWindowsThreads peers = {0};
+  int frozen = windows_suspend_threads(plan, &peers);
+  int committed = frozen && windows_write_plan(plan);
+  windows_resume_threads(&peers);
+  return committed;
 }
 #endif

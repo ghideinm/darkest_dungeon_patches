@@ -67,6 +67,35 @@ class WindowsProfileTest(unittest.TestCase):
 
 
 class WindowsDllRuntimeTest(unittest.TestCase):
+    def test_delayed_resource_growth_preserves_native_ownership_and_read_bounds(self):
+        compiler, runner = (os.getenv(n) for n in ("DD_WINDOWS_CC", "DD_WINDOWS_RUNNER"))
+        if not compiler or not runner:
+            self.skipTest("Set DD_WINDOWS_CC and DD_WINDOWS_RUNNER for native fixtures")
+        with tempfile.TemporaryDirectory(prefix="dd-delayed-buffer-") as directory:
+            binary = Path(directory) / "buffer.exe"
+            subprocess.run(
+                [
+                    compiler,
+                    "-std=c11",
+                    "-O2",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(WINDOWS_NATIVE),
+                    str(Path(__file__).with_name("windows_buffer_fixture.c")),
+                    "-lm",
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+            )
+            result = subprocess.run(
+                [runner, str(binary)], capture_output=True, text=True, timeout=60
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("OWN_DELAYED_BUFFER_GROWTH_OK", result.stdout)
+
     def test_actor_failure_falls_back_and_native_vectors_exceed_old_limits(self):
         compiler, runner = (os.getenv(n) for n in ("DD_WINDOWS_CC", "DD_WINDOWS_RUNNER"))
         if not compiler or not runner:
@@ -213,6 +242,7 @@ int main(void) {
 #include <mmsystem.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 static HMODULE loaded_plugin;
 static DWORD WINAPI load_plugin(void *path) {
@@ -220,6 +250,8 @@ static DWORD WINAPI load_plugin(void *path) {
 }
 static DWORD WINAPI worker(void *unused) {(void)unused;return timeGetTime() ? 0 : 1;}
 int wmain(void) {
+ void *(*volatile allocate)(size_t)=malloc;
+ void *memory=allocate(1);if(!memory)return 20;free(memory);
  wchar_t path[4096];
  HMODULE plugin;
  if(GetEnvironmentVariableW(L"DD_FIXTURE_DLL_PATH",path,4096)) {
@@ -235,8 +267,9 @@ int wmain(void) {
  if(!ready || *ready!=(original?0:1))return 11;
  uint32_t expected=original?DD_EXPECT_CAP:
    GetEnvironmentVariableW(L"DD_EXPECT_CONFIGURED",NULL,0)?0x4000000:0x2000000;
- const unsigned sites[]={DD_RESOURCE_RVA,DD_RESOURCE_RVA_1,DD_RESOURCE_RVA_2};
- for(unsigned i=0;i<3;++i){uint32_t cap;memcpy(&cap,image+sites[i],4);if(cap!=expected)return 12;}
+ uint32_t cap;memcpy(&cap,image+DD_RESOURCE_RVA,4);if(cap!=expected)return 12;
+ if(image[DD_RESOURCE_RVA_1]!=(original?0xc7:0xe9))return 21;
+ if(image[DD_RESOURCE_RVA_2]!=(original?0xc7:0x8b))return 22;
  if(image[DD_COLOUR_RVA]!=(original?0x48:0xe9))return 13;
  if(image[DD_RENDER_RVA]!=(original?0xbf:0x90))return 14;
  if(image[DD_PALETTE_RVA]!=(original?0x48:0xe9))return 18;
@@ -252,8 +285,8 @@ int wmain(void) {
 """)
             definitions = [
                 f"-DDD_RESOURCE_RVA={fixture.symbols['RESOURCE_0'] + 1}",
-                f"-DDD_RESOURCE_RVA_1={fixture.symbols['RESOURCE_1'] + 7}",
-                f"-DDD_RESOURCE_RVA_2={fixture.symbols['RESOURCE_2'] + 4}",
+                f"-DDD_RESOURCE_RVA_1={fixture.symbols['RESOURCE_1']}",
+                f"-DDD_RESOURCE_RVA_2={fixture.symbols['RESOURCE_2']}",
                 f"-DDD_COLOUR_RVA={fixture.symbols['HOOK_COLOUR']}",
                 f"-DDD_RENDER_RVA={fixture.symbols['RENDER_0']}",
                 f"-DDD_PALETTE_RVA={fixture.symbols['FULL_PATH']}",
@@ -277,6 +310,33 @@ int wmain(void) {
             pe = struct.unpack_from("<I", data, 60)[0]
             count = struct.unpack_from("<H", data, pe + 6)[0]
             optional = struct.unpack_from("<H", data, pe + 20)[0]
+
+            def file_offset(rva):
+                for index in range(count):
+                    at = pe + 24 + optional + index * 40
+                    size, address, raw_size, position = struct.unpack_from("<IIII", data, at + 8)
+                    if address <= rva < address + max(size, raw_size):
+                        return position + rva - address
+                raise AssertionError("Import RVA outside fixture sections")
+
+            # Point the synthetic allocator feature at this own executable's
+            # real UCRT import, so DLL and early WinMM loading use the same heap.
+            descriptor = file_offset(struct.unpack_from("<I", data, pe + 144)[0])
+            allocator = None
+            while struct.unpack_from("<I", data, descriptor + 12)[0]:
+                lookup, _, _, _, iat = struct.unpack_from("<IIIII", data, descriptor)
+                index = 0
+                while name := struct.unpack_from("<Q", data, file_offset(lookup) + index * 8)[0]:
+                    if name < 1 << 63:
+                        start = file_offset(name) + 2
+                        if data[start : data.index(0, start)] == b"malloc":
+                            allocator = iat + index * 8
+                    index += 1
+                descriptor += 20
+            self.assertIsNotNone(allocator)
+            marker = hashlib.blake2s(b"dd fixture RESOURCE_ALLOCATOR", digest_size=16).digest()
+            at = fixture.code.index(marker) - 7
+            struct.pack_into("<i", fixture.code, at + 3, allocator - fixture.code_address - at - 7)
             section = pe + 24 + optional + count * 40
             self.assertLessEqual(section + 80, struct.unpack_from("<I", data, pe + 84)[0])
             raw = (len(data) + 4095) & ~4095

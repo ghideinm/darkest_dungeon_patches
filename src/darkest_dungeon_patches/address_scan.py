@@ -80,7 +80,7 @@ def read_image(path: Path, platform: str) -> list[ImageRange]:
         if (
             machine != 0x8664
             or optional != 240
-            or not 0 < count <= 32
+            or not 0 < count <= 96
             or struct.unpack_from("<H", data, pe + 24)[0] != 0x20B
         ):
             raise ValueError("Unsupported Windows PE architecture or layout")
