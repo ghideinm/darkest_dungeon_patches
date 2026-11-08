@@ -90,6 +90,8 @@ Linux 不读取 INI 文件，`DD_PATCH_CONFIG` 也不参与配置。合并发布
 
 编辑补丁二进制同目录的 `dd_engine_patch.ini`，修改后重启游戏。缺少文件时使用默认值；也可用环境变量 `DD_PATCH_CONFIG` 指定其他 INI 路径。Linux 的上述五个新参数不会覆盖 Windows 的 INI 值。
 
+发布包中的 INI 使用 UTF-8 编码和 Windows CRLF 换行，每个配置项独占一行；注释放在单独一行，以 `;` 开头。请勿保存为 UTF-16，或把注释追加在数值后。
+
 ```ini
 [memory]
 resource_buffer_mib=32

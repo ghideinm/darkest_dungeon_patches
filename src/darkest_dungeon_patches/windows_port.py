@@ -83,9 +83,12 @@ def compile_binaries(output: Path, compiler: str | None = None, proxy: Path | No
     ]
     proxy = acquire(output / "winmm.dll", proxy)
     configuration = output / "winmm.ini"
-    shutil.copyfile(PATCH_ROOT / "scripts/windows/winmm.ini", configuration)
     patch_configuration = output / "dd_engine_patch.ini"
-    shutil.copyfile(CONFIG_SCRIPTS / patch_configuration.name, patch_configuration)
+    for source, target in (
+        (PATCH_ROOT / "scripts/windows/winmm.ini", configuration),
+        (CONFIG_SCRIPTS / patch_configuration.name, patch_configuration),
+    ):
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8", newline="\r\n")
     library = output / "dd_engine_patch.dll"
     subprocess.run(
         [*common, "-shared", str(COMMON_NATIVE / "skin_rig_patch.c"), "-lm", "-o", str(library)],
