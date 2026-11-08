@@ -14,7 +14,7 @@
 
 使用原生 x86-64 游戏，在 Steam 兼容性设置中关闭强制 Proton。
 
-1. 将两个 SO 和 `dd_engine_patch.ini` 放到同一个固定目录，例如 `/home/user/.local/share/darkest_dungeon_patches`。路径不能包含空白或冒号。
+1. 将两个 SO 放到同一个固定目录，例如 `/home/user/.local/share/darkest_dungeon_patches`。路径不能包含空白或冒号。
 2. Steam →《暗黑地牢》→ 属性 → 通用 → 启动选项，填写下面一整行，将所有 `user` 替换为实际用户名：
 
    ```text
@@ -56,7 +56,28 @@ dd_engine_patch.ini   # 补丁内存与日志配置
 
 ## 配置
 
-编辑补丁二进制同目录的 `dd_engine_patch.ini`，修改后重启游戏。缺少文件时使用默认值；也可用环境变量 `DD_PATCH_CONFIG` 指定配置文件路径。
+### Linux：SO + 环境变量
+
+Linux 不读取 INI 文件，`DD_PATCH_CONFIG` 也不参与配置。合并发布包中的 INI 供 Windows 使用，Linux 只需要两个 SO。所有参数在启动时读取，修改后重启游戏。
+
+| 环境变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `DD_LOADBUFFER_PATCH` | `0` | `1` 开启资源缓冲补丁 |
+| `DD_NATIVE_RENDER` | `0` | `1` 开启原生画布；需要 `DD_LOADBUFFER_PATCH=1` |
+| `DD_RIG_RUNTIME` | `0` | `1` 开启按 Mod 来源加载骨架及皮肤遮掩 |
+| `DD_RESOURCE_BUFFER_MIB` | `32` | 每个资源读取缓冲的 MiB 数，允许 6–2047；使用系统内存，分配与读取检查同步修改 |
+| `DD_CACHE_INITIAL_CAPACITY` | `16` | 皮肤方案、职业目录缓存各自的初始条目数，之后自动翻倍扩容 |
+| `DD_HIDE_VANILLA_SKINS` | `1` | 有 Mod 皮肤时跳过同职业的原版及官方 DLC 皮肤；无 Mod 的职业保持原样 |
+| `DD_LOG_TO_FILE` | `0` | `1` 将补丁诊断追加到文件，并及时刷新 |
+| `DD_LOG_FILE` | `dd_engine_patch.log` | 日志路径；相对路径以游戏当前工作目录为准，目录需已存在 |
+
+示例：在安装步骤的 Steam 启动选项中添加 `DD_RESOURCE_BUFFER_MIB=64 DD_CACHE_INITIAL_CAPACITY=32 DD_HIDE_VANILLA_SKINS=1 DD_LOG_TO_FILE=1 DD_LOG_FILE=/home/user/dd_patch.log`。
+
+旧的 `DD_PATCH_LOG` 仍兼容：未设置 `DD_LOG_FILE` 时可提供日志路径；只设置旧路径会启用落盘，但显式 `DD_LOG_TO_FILE=0` 始终关闭落盘。`DD_RIG_MAP` 是旧的手工骨架映射入口，仅用于未开启 `DD_RIG_RUNTIME` 的高级模式，通常无需设置。
+
+### Windows：DLL/ASI + INI
+
+编辑补丁二进制同目录的 `dd_engine_patch.ini`，修改后重启游戏。缺少文件时使用默认值；也可用环境变量 `DD_PATCH_CONFIG` 指定其他 INI 路径。Linux 的上述五个新参数不会覆盖 Windows 的 INI 值。
 
 ```ini
 [memory]
@@ -71,23 +92,23 @@ log_to_file=0
 log_file=dd_engine_patch.log
 ```
 
-- `resource_buffer_mib`：每个资源读取缓冲的大小，单位 MiB，使用系统内存。允许范围为 Linux 6–2047、Windows 16–2047；分配大小与读取检查同步修改。
-- `cache_initial_capacity`：皮肤方案、职业目录缓存各自的初始条目数。容量不足时继续翻倍扩容，不是条目上限。
-- `hide_vanilla_skins`：默认 `1`，某职业有 Mod 皮肤时，换肤、角色创建和预览优先使用 Mod 皮肤，切换时跳过该职业全部原版及官方 DLC 皮肤。没有 Mod 皮肤的职业保留原版选择。设为 `0` 可关闭；需要启用动态骨架功能。保留游戏原始皮肤编号和资源，支持正反向循环；原版及 DLC 资源仍可为 Mod 补齐动作。更新时已有配置中明确填写的 `0` 会保留。
-- `log_to_file`：`0` 只输出调试信息；`1` 同时将补丁诊断追加到文件，并及时刷新。默认关闭落盘。
-- `log_file`：日志路径；相对路径以配置文件所在目录为基准，也可填写 UTF-8 绝对路径。目录需已存在。日志无法打开时补丁继续运行。
+- `resource_buffer_mib`：每个资源读取缓冲的大小，单位 MiB，使用系统内存，允许 16–2047；分配大小与读取检查同步修改。
+- `cache_initial_capacity`：皮肤方案、职业目录缓存各自的初始条目数，之后自动翻倍扩容。
+- `hide_vanilla_skins`：默认 `1`，有 Mod 皮肤时跳过同职业的原版及官方 DLC 皮肤；设为 `0` 关闭。更新时已有配置中明确填写的 `0` 会保留。
+- `log_to_file`：默认 `0`；`1` 同时将补丁诊断追加到文件，并及时刷新。
+- `log_file`：日志路径；相对路径以 INI 所在目录为准，也可填写 UTF-8 绝对路径。目录需已存在。
 
-无效字段保留默认值（重复字段保留前一个有效值），原因写入调试输出；配置不会在每次分配内存时重新读取。Linux 两个 SO 使用同目录配置时共享参数与日志文件，补丁不会重定向游戏自身的标准错误输出。没有可读配置文件时，旧的 `DD_PATCH_LOG` 环境变量仍可启用文件日志。
+`winmm.ini` 独立控制 Windows 代理加载器日志和崩溃转储；`dd_engine_patch.ini` 控制补丁自身的诊断日志。没有可读 INI 时，兼容 `DD_PATCH_LOG` 日志路径。
 
-Windows 的 `winmm.ini` 独立控制代理加载器日志和崩溃转储，`dd_engine_patch.ini` 控制补丁自身的诊断日志。游戏和 Steam 自身的日志不受此开关控制。
+两平台的无效值均保留默认值（INI 重复字段保留前一个有效值），原因写入调试输出。日志无法打开时补丁继续运行，且不会重定向游戏自身的标准错误输出。皮肤遮掩保留游戏原始编号和资源，支持正反向循环；原版及 DLC 资源仍可为 Mod 补齐动作。游戏和 Steam 自身的日志不受补丁日志开关控制。
 
 ## 卸载
 
 ### Linux
 
 1. 正常退出游戏。
-2. Steam →《暗黑地牢》→ 属性 → 通用 → 启动选项，恢复安装前的内容。若只填写了上面的示例，清空即可；与其他库共用 `LD_PRELOAD` 时，保留其他库，只移除本补丁的两个 SO 路径和本补丁添加的 `DD_*` 环境变量（包括可选的 `DD_PATCH_CONFIG`）。
-3. 之后可删除两个 SO、`dd_engine_patch.ini` 和所配置的补丁日志。
+2. Steam →《暗黑地牢》→ 属性 → 通用 → 启动选项，恢复安装前的内容。若只填写了上面的示例，清空即可；与其他库共用 `LD_PRELOAD` 时，保留其他库，只移除本补丁的两个 SO 路径和本补丁添加的 `DD_*` 环境变量。
+3. 之后可删除两个 SO 和所配置的补丁日志。
 
 ### Windows
 
@@ -109,7 +130,8 @@ Windows 的 `winmm.ini` 独立控制代理加载器日志和崩溃转储，`dd_e
 
 | 日志 | 位置 |
 | --- | --- |
-| Linux / Windows | `log_to_file=1` 时写入 `log_file`；默认关闭落盘。始终保留调试输出 |
+| Linux | `DD_LOG_TO_FILE=1` 时写入 `DD_LOG_FILE`（兼容旧的 `DD_PATCH_LOG`） |
+| Windows | INI 中 `log_to_file=1` 时写入 `log_file` |
 
 - 游戏更新后仍默认尝试加载，不按版本号或 EXE 哈希限制；特征不兼容时记录原因并跳过补丁。
 - Linux 未生效时，检查 SO 绝对路径、开关和日志目录权限，确认未使用 Proton。

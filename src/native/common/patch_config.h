@@ -14,13 +14,14 @@
 #include <windows.h>
 #define DD_ORIGINAL_BUFFER_MIB 16U
 #else
-#include <dlfcn.h>
 #include <unistd.h>
 #define DD_ORIGINAL_BUFFER_MIB 6U
 #endif
 
 #define DD_MIB UINT32_C(1048576)
+#ifdef _WIN32
 #define DD_CONFIG_NAME "dd_engine_patch.ini"
+#endif
 typedef struct {
   uint32_t resource_buffer_mib;
   size_t cache_initial_capacity;
@@ -67,6 +68,7 @@ static inline int dd_config_number(const char *text, uint64_t minimum,
   *out = number;
   return 1;
 }
+#ifdef _WIN32
 /* Parse into defaults, retaining a valid field when another field is invalid.
  */
 static inline unsigned dd_config_read(FILE *file, DdPatchConfig *config,
@@ -144,14 +146,10 @@ static inline unsigned dd_config_read(FILE *file, DdPatchConfig *config,
   return invalid + (unsigned)(ferror(file) != 0);
 }
 static inline int dd_absolute_path(const char *path) {
-#ifdef _WIN32
   return *path == '/' || *path == '\\' ||
          (((path[0] >= 'A' && path[0] <= 'Z') ||
            (path[0] >= 'a' && path[0] <= 'z')) &&
           path[1] == ':' && (path[2] == '/' || path[2] == '\\'));
-#else
-  return *path == '/';
-#endif
 }
 static inline int dd_relative_path(char out[4096], const char *anchor,
                                    const char *path) {
@@ -159,11 +157,9 @@ static inline int dd_relative_path(char out[4096], const char *anchor,
     return dd_copy(out, 4096, path);
   }
   const char *slash = strrchr(anchor, '/');
-#ifdef _WIN32
   const char *back = strrchr(anchor, '\\');
   if (back && (!slash || back > slash))
     slash = back;
-#endif
   size_t prefix = slash ? (size_t)(slash - anchor + 1) : 0;
   if (prefix >= 4096 || strlen(path) >= 4096 - prefix)
     return 0;
@@ -172,17 +168,12 @@ static inline int dd_relative_path(char out[4096], const char *anchor,
   return 1;
 }
 static inline FILE *dd_open_utf8(const char *path, int append) {
-#ifdef _WIN32
   wchar_t wide[4096];
   if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 4096))
     return NULL;
   return _wfopen(wide, append ? L"ab" : L"rb");
-#else
-  return fopen(path, append ? "ab" : "rb");
-#endif
 }
 static inline int dd_module_path(char path[4096], const void *anchor) {
-#ifdef _WIN32
   HMODULE module = NULL;
   wchar_t wide[4096];
   if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -192,23 +183,9 @@ static inline int dd_module_path(char path[4096], const void *anchor) {
   DWORD length = GetModuleFileNameW(module, wide, 4096);
   return length && length < 4096 &&
          WideCharToMultiByte(CP_UTF8, 0, wide, -1, path, 4096, NULL, NULL) > 0;
-#else
-  Dl_info info;
-  if (!dladdr(anchor, &info) || !info.dli_fname)
-    return 0;
-  if (*info.dli_fname == '/') {
-    return dd_copy(path, 4096, info.dli_fname);
-  }
-  char cwd[4096];
-  if (!getcwd(cwd, sizeof(cwd)))
-    return 0;
-  int length = snprintf(path, 4096, "%s/%s", cwd, info.dli_fname);
-  return length > 0 && length < 4096;
-#endif
 }
 static inline const char *dd_path_environment(const char *name,
                                               char utf8[4096]) {
-#ifdef _WIN32
   wchar_t key[64], value[4096];
   if (!MultiByteToWideChar(CP_UTF8, 0, name, -1, key, 64))
     return NULL;
@@ -217,11 +194,47 @@ static inline const char *dd_path_environment(const char *name,
       !WideCharToMultiByte(CP_UTF8, 0, value, -1, utf8, 4096, NULL, NULL))
     return NULL;
   return utf8;
-#else
-  (void)utf8;
-  return getenv(name);
-#endif
 }
+#else
+static inline unsigned dd_environment_number(const char *name, uint64_t minimum,
+                                             uint64_t maximum,
+                                             uint64_t *value) {
+  const char *text = getenv(name);
+  return text && !dd_config_number(text, minimum, maximum, value);
+}
+static inline unsigned dd_config_environment(void) {
+  unsigned invalid = 0;
+  uint64_t value = dd_config.resource_buffer_mib;
+  invalid +=
+      dd_environment_number("DD_RESOURCE_BUFFER_MIB", DD_ORIGINAL_BUFFER_MIB,
+                            INT32_MAX / DD_MIB, &value);
+  dd_config.resource_buffer_mib = (uint32_t)value;
+  value = dd_config.cache_initial_capacity;
+  invalid += dd_environment_number("DD_CACHE_INITIAL_CAPACITY", 1,
+                                   PTRDIFF_MAX / sizeof(void *), &value);
+  dd_config.cache_initial_capacity = (size_t)value;
+  value = (unsigned)dd_config.hide_vanilla_skins;
+  invalid += dd_environment_number("DD_HIDE_VANILLA_SKINS", 0, 1, &value);
+  dd_config.hide_vanilla_skins = (int)value;
+  const char *path = getenv("DD_LOG_FILE");
+  int legacy_log = 0;
+  if (!path) {
+    path = getenv("DD_PATCH_LOG");
+    legacy_log = path && *path;
+    if (!legacy_log)
+      path = NULL;
+  }
+  if (path && (!*path || !dd_copy(dd_config.log_file,
+                                  sizeof(dd_config.log_file), path))) {
+    ++invalid;
+    legacy_log = 0;
+  }
+  value = !getenv("DD_LOG_TO_FILE") && legacy_log ? 1 : 0;
+  invalid += dd_environment_number("DD_LOG_TO_FILE", 0, 1, &value);
+  dd_config.log_to_file = (int)value;
+  return invalid;
+}
+#endif
 static inline void dd_debug_line(int descriptor, const char *text,
                                  size_t length) {
 #ifdef _WIN32
@@ -261,6 +274,7 @@ static inline void dd_runtime_init(const void *anchor) {
   if (dd_config_initialized)
     return;
   dd_config_initialized = 1;
+#ifdef _WIN32
   char module[4096] = {0}, config_path[4096] = {0};
   int module_found = dd_module_path(module, anchor);
   char explicit_utf8[4096], legacy_utf8[4096];
@@ -293,12 +307,25 @@ static inline void dd_runtime_init(const void *anchor) {
   if (invalid)
     dd_patch_log(2, "DD_PATCH_CONFIG_INVALID fields=%u path=%s\n", invalid,
                  config_path);
+  const char *source = config_found ? config_path : "defaults";
+#else
+  (void)anchor;
+  unsigned invalid = dd_config_environment();
+  if (dd_config.log_to_file) {
+    dd_log_file = fopen(dd_config.log_file, "ab");
+    if (!dd_log_file)
+      dd_patch_log(2, "DD_PATCH_LOG_UNAVAILABLE\n");
+  }
+  if (invalid)
+    dd_patch_log(2, "DD_PATCH_CONFIG_INVALID fields=%u source=environment\n",
+                 invalid);
+  const char *source = "environment";
+#endif
   dd_patch_log(2,
                "DD_PATCH_CONFIG buffer_mib=%u cache_initial=%zu log_to_file=%d "
                "hide_vanilla_skins=%d path=%s\n",
                dd_config.resource_buffer_mib, dd_config.cache_initial_capacity,
-               dd_config.log_to_file, dd_config.hide_vanilla_skins,
-               config_found ? config_path : "defaults");
+               dd_config.log_to_file, dd_config.hide_vanilla_skins, source);
 }
 static inline uint32_t dd_resource_buffer_bytes(void) {
   return dd_config.resource_buffer_mib * DD_MIB;

@@ -118,10 +118,6 @@ class PreloadCompatibilityTest(unittest.TestCase):
                 work = root / str(index)
                 work.mkdir()
                 expected_capacity = (32 if index == 0 else 64) * 1024 * 1024
-                if index == 1:
-                    (root / "dd_engine_patch.ini").write_text(
-                        "[memory]\nresource_buffer_mib=64\ncache_initial_capacity=3\n"
-                    )
                 (work / "code.bin").write_bytes(fixture.code)
                 (work / "data.bin").write_bytes(fixture.data)
                 assembly = work / "sections.s"
@@ -175,6 +171,8 @@ class PreloadCompatibilityTest(unittest.TestCase):
                         DD_NATIVE_RENDER="1",
                         DD_LOADBUFFER_PATCH="1",
                         DD_PATCH_LOG="",
+                        DD_RESOURCE_BUFFER_MIB="32" if index == 0 else "64",
+                        DD_CACHE_INITIAL_CAPACITY="16" if index == 0 else "3",
                     ),
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -211,6 +209,8 @@ class PreloadCompatibilityTest(unittest.TestCase):
                             DD_NATIVE_RENDER="1",
                             DD_LOADBUFFER_PATCH="1",
                             DD_PATCH_LOG="",
+                            DD_RESOURCE_BUFFER_MIB="64",
+                            DD_CACHE_INITIAL_CAPACITY="3",
                         ),
                     )
                     self.assertEqual(mismatch.returncode, 3, mismatch.stderr)
