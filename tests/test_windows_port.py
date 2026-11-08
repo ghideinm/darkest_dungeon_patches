@@ -1,7 +1,6 @@
-"""Code-only Windows proxy, installation and native plugin regressions."""
+"""Code-only Windows instruction checks and DLL loading regressions."""
 
 import hashlib
-import json
 import os
 import struct
 import subprocess
@@ -15,12 +14,8 @@ from address_fixtures import make_fixture, write_pe
 from darkest_dungeon_patches import windows_port, windows_proxy
 from darkest_dungeon_patches.paths import (
     COMMON_NATIVE,
-    CONFIG_SCRIPTS,
     WINDOWS_NATIVE,
-    WINDOWS_SCRIPTS,
 )
-
-IDENTITY = b"DarkestDungeonPatches.Win64.ProxyPlugin.v1"
 
 
 class ProxyPayloadTest(unittest.TestCase):
@@ -48,198 +43,6 @@ class ProxyPayloadTest(unittest.TestCase):
                         windows_proxy.acquire(Path(directory) / "winmm.dll")
 
 
-class WindowsSetupTest(unittest.TestCase):
-    def run_powershell(self, script, root):
-        runner = os.environ.get("DD_WINDOWS_POWERSHELL")
-        if not runner:
-            self.skipTest("Set DD_WINDOWS_POWERSHELL for setup regressions")
-        path = root / "test.ps1"
-        path.write_text(script)
-        result = subprocess.run(
-            [runner, "-NoLogo", "-NoProfile", "-File", str(path)],
-            capture_output=True,
-            text=True,
-            timeout=40,
-            env=dict(
-                os.environ,
-                XDG_CACHE_HOME=str(root / ".cache"),
-                XDG_CONFIG_HOME=str(root / ".config"),
-                XDG_DATA_HOME=str(root / ".data"),
-            ),
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return json.loads(result.stdout)
-
-    def fixture(self, root):
-        package, game, steam, local = (root / n for n in ("package", "game", "steam", "local"))
-        package.mkdir()
-        local.mkdir()
-        setup = package / "windows_install.ps1"
-        setup.write_bytes((WINDOWS_SCRIPTS / setup.name).read_bytes())
-        (package / "winmm.dll").write_bytes(b"own proxy fixture")
-        (package / "winmm.ini").write_bytes((WINDOWS_SCRIPTS / "winmm.ini").read_bytes())
-        (package / "dd_engine_patch.ini").write_bytes(
-            (CONFIG_SCRIPTS / "dd_engine_patch.ini").read_bytes()
-        )
-        (package / "dd_engine_patch.asi").write_bytes(b"own PE plugin " + IDENTITY)
-        header = bytearray(512)
-        header[:2] = b"MZ"
-        struct.pack_into("<I", header, 60, 128)
-        header[128:132] = b"PE\0\0"
-        struct.pack_into("<H", header, 132, 0x8664)
-        struct.pack_into("<H", header, 152, 0x20B)
-        for sub in ("_windows/win64", "_windowsnosteam/win64"):
-            binary = game / sub / "Darkest.exe"
-            binary.parent.mkdir(parents=True)
-            binary.write_bytes(header)
-        config = steam / "userdata/123/config/localconfig.vdf"
-        config.parent.mkdir(parents=True)
-        config.write_text(
-            '"UserLocalConfigStore" { "Software" { "Valve" { "Steam" { '
-            '"apps" { "262060" { "LaunchOptions" "-original" } } } } } }'
-        )
-        paths = root / "paths.json"
-        paths.write_text(
-            json.dumps(
-                dict(
-                    setup=str(setup),
-                    game=str(game),
-                    steam=str(steam),
-                    local=str(local),
-                    config=str(config),
-                    package=str(package),
-                )
-            )
-        )
-        return (
-            "$x=Get-Content -Raw '" + str(paths) + "'|ConvertFrom-Json\n"
-            "$env:LOCALAPPDATA=$x.local\n"
-            ". $x.setup -GameRoot $x.game -SteamRoot $x.steam\n"
-            "function Get-Process {param($Name,$ErrorAction) if($script:busy){[pscustomobject]@{Id=42}}}\n"
-        )
-
-    def test_two_entries_update_rollback_conflict_and_minimal_uninstall(self):
-        with tempfile.TemporaryDirectory(prefix="dd-proxy-setup with spaces-") as directory:
-            root = Path(directory)
-            script = (
-                self.fixture(root)
-                + r"""
-$script:busy=$true;$blocked=$false
-try{Invoke-Setup|Out-Null}catch{$blocked=-not(Test-Path (Join-Path $x.game '_windows/win64/winmm.dll'))}
-$script:busy=$false
-$first=Invoke-Setup
-$custom=Join-Path $first.targets[0] 'dd_engine_patch.ini'
-[IO.File]::WriteAllText($custom,"[memory]`nresource_buffer_mib=64`n")
-$again=Invoke-Setup
-$preserved=[IO.File]::ReadAllText($custom) -ceq "[memory]`nresource_buffer_mib=64`n"
-$targets=@($first.targets)
-$minimal=$true
-foreach($dir in $targets){$minimal=$minimal -and (@(Get-ChildItem $dir -File).Count -eq 5)}
-$old=[IO.File]::ReadAllBytes((Join-Path $targets[0] 'dd_engine_patch.asi'))
-$source=Join-Path $x.package 'dd_engine_patch.asi'
-[IO.File]::AppendAllText($source,' update')
-$realWrite=(Get-Item Function:Write-AtomicBytes).ScriptBlock
-$script:fail=$true
-function Write-AtomicBytes([string]$Path,[byte[]]$Bytes){
- if($script:fail -and $Path.EndsWith('winmm.dll') -and $Path.Contains('_windowsnosteam')){$script:fail=$false;throw 'fixture write failure'}
- & $realWrite $Path $Bytes
-}
-$failed=$false
-try{Invoke-Setup|Out-Null}catch{$failed=$true}
-$rollback=$true
-foreach($dir in $targets){$rollback=$rollback -and ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $dir 'dd_engine_patch.asi'))) -ceq [Convert]::ToBase64String($old))}
-Set-Item Function:Write-AtomicBytes $realWrite
-$Action='Uninstall';$removed=Invoke-Setup
-$clean=$true
-foreach($dir in $targets){$clean=$clean -and (@(Get-ChildItem $dir -File).Count -eq 1)}
-$foreign=Join-Path $targets[1] 'winmm.dll';[IO.File]::WriteAllText($foreign,'another mod')
-$Action='Install';$conflict=$false
-try{Invoke-Setup|Out-Null}catch{$conflict=[IO.File]::ReadAllText($foreign) -ceq 'another mod'}
-$partial=Test-Path (Join-Path $targets[0] 'dd_engine_patch.asi')
-Remove-Item -LiteralPath $foreign
-$foreign=Join-Path $targets[1] 'winmm.ini';[IO.File]::WriteAllText($foreign,'another mod configuration')
-$configurationConflict=$false
-try{Invoke-Setup|Out-Null}catch{$configurationConflict=([IO.File]::ReadAllText($foreign) -ceq 'another mod configuration') -and -not(Test-Path (Join-Path $targets[0] 'dd_engine_patch.asi'))}
-[ordered]@{blocked=$blocked;count=$targets.Count;minimal=$minimal;preserved=$preserved;failed=$failed;rollback=$rollback;clean=$clean;conflict=$conflict;configuration_conflict=$configurationConflict;partial=$partial;no_state=(-not(Test-Path (Join-Path $x.local 'DarkestDungeonPatches')))}|ConvertTo-Json
-"""
-            )
-            result = self.run_powershell(script, root)
-            self.assertEqual(result["count"], 2)
-            for key in (
-                "blocked",
-                "minimal",
-                "preserved",
-                "failed",
-                "rollback",
-                "clean",
-                "conflict",
-                "configuration_conflict",
-                "no_state",
-            ):
-                self.assertTrue(result[key], key)
-            self.assertFalse(result["partial"])
-
-    def test_migration_restores_options_and_removes_legacy_files(self):
-        with tempfile.TemporaryDirectory(prefix="dd-proxy-migration-") as directory:
-            root = Path(directory)
-            script = (
-                self.fixture(root)
-                + r"""
-$folder=Join-Path $x.local 'DarkestDungeonPatches/steam'
-New-Item -ItemType Directory -Path $folder -Force|Out-Null
-$original=[IO.File]::ReadAllText($x.config)
-$current=Set-SteamLaunchOptions $original '"old launcher.exe" --steam %command% -original'
-[IO.File]::WriteAllText($x.config,$current)
-$state=[ordered]@{version=1;app_id='262060';game=(Join-Path $x.game '_windows/win64/Darkest.exe');localconfig=$x.config;launch_options=(Get-SteamLaunchOptions $current);previous_launch_options='-original'}
-$statePath=Join-Path $folder 'steam_install.json'
-$state|ConvertTo-Json|Set-Content $statePath
-foreach($name in @('dd_windows_launcher.exe','dd_skin_rig_patch.dll','windows_launch.log')){[IO.File]::WriteAllText((Join-Path $folder $name),'own old fixture')}
-$setupLog=Join-Path (Split-Path -Parent $folder) 'setup.log';[IO.File]::WriteAllText($setupLog,'own old log')
-$installed=Invoke-Setup
-$restored=Get-SteamLaunchOptions ([IO.File]::ReadAllText($x.config))
-$legacyClean=(@(Get-ChildItem $folder -File).Count -eq 0) -and -not(Test-Path $setupLog)
-# Missing prior LaunchOptions must be removed, rather than changed to an empty string.
-[IO.File]::WriteAllText($x.config,$current)
-$state.previous_launch_options=$null;$state|ConvertTo-Json|Set-Content $statePath
-$again=Invoke-Setup
-$absent=$null -eq (Get-SteamLaunchOptions ([IO.File]::ReadAllText($x.config)))
-# User edits after the old installation prevent any migration.
-$state|ConvertTo-Json|Set-Content $statePath
-[IO.File]::WriteAllText($x.config,(Set-SteamLaunchOptions $original 'manual edit'))
-$refused=$false
-try{Invoke-Setup|Out-Null}catch{$refused=(Get-SteamLaunchOptions ([IO.File]::ReadAllText($x.config))) -ceq 'manual edit'}
-[ordered]@{migrated=$installed.migrated;restored=$restored;clean=$legacyClean;absent=$absent;refused=$refused}|ConvertTo-Json
-"""
-            )
-            result = self.run_powershell(script, root)
-            self.assertEqual(result["migrated"], 1)
-            self.assertEqual(result["restored"], "-original")
-            for key in ("clean", "absent", "refused"):
-                self.assertTrue(result[key], key)
-
-    def test_library_aliases_and_nonsteam_only_installation(self):
-        with tempfile.TemporaryDirectory(prefix="dd-proxy-discovery-") as directory:
-            root = Path(directory)
-            script = (
-                self.fixture(root)
-                + r"""
-Remove-Item (Join-Path $x.game '_windows') -Recurse -Force
-$apps=Join-Path $x.steam 'steamapps';$inside=Join-Path $apps 'common/Fixture'
-New-Item -ItemType Directory -Path (Split-Path -Parent $inside) -Force|Out-Null
-Copy-Item $x.game $inside -Recurse
-[IO.File]::WriteAllText((Join-Path $apps 'appmanifest_262060.acf'),'"AppState" { "installdir" "Fixture" }')
-$alias=$x.steam+'/../steam'
-[IO.File]::WriteAllText((Join-Path $apps 'libraryfolders.vdf'),('"libraryfolders" { "0" { "path" '+(ConvertTo-VdfToken $alias)+' } }'))
-$found=Find-SteamGame $x.steam
-$installed=Invoke-Setup
-[ordered]@{found=$found;expected=$inside;count=@($installed.targets).Count}|ConvertTo-Json
-"""
-            )
-            result = self.run_powershell(script, root)
-            self.assertEqual(Path(result["found"]), Path(result["expected"]))
-            self.assertEqual(result["count"], 1)
-
-
 class WindowsProfileTest(unittest.TestCase):
     def test_offline_check_accepts_moved_code_and_data(self):
         with tempfile.TemporaryDirectory(prefix="dd-pe-profile-unit-") as directory:
@@ -263,7 +66,7 @@ class WindowsProfileTest(unittest.TestCase):
                     windows_port.validate(path)
 
 
-class WindowsProxyRuntimeTest(unittest.TestCase):
+class WindowsDllRuntimeTest(unittest.TestCase):
     def test_actor_failure_falls_back_and_native_vectors_exceed_old_limits(self):
         compiler, runner = (os.getenv(n) for n in ("DD_WINDOWS_CC", "DD_WINDOWS_RUNNER"))
         if not compiler or not runner:
@@ -380,15 +183,13 @@ int main(void) {
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("OWN_ACTOR_FALLBACK_OK", result.stdout)
 
-    def test_automatic_plugin_and_unmodified_fallback_on_own_executable(self):
+    def test_dll_and_winmm_loading_and_unmodified_fallback_on_own_executable(self):
         compiler, runner, proxy = (
             os.getenv(n) for n in ("DD_WINDOWS_CC", "DD_WINDOWS_RUNNER", "DD_WINDOWS_PROXY")
         )
-        if not all((compiler, runner, proxy)):
-            self.skipTest(
-                "Set DD_WINDOWS_CC, DD_WINDOWS_RUNNER and DD_WINDOWS_PROXY for native fixtures"
-            )
-        with tempfile.TemporaryDirectory(prefix="dd-native-proxy-") as directory:
+        if not compiler or not runner:
+            self.skipTest("Set DD_WINDOWS_CC and DD_WINDOWS_RUNNER for native fixtures")
+        with tempfile.TemporaryDirectory(prefix="dd-native-dll-") as directory:
             root = Path(directory)
             fixture = make_fixture(root, "windows", 0x650000, 0x840000)
             # A wildcard allows the instruction guard to be tested independently of scanning.
@@ -413,9 +214,20 @@ int main(void) {
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+static HMODULE loaded_plugin;
+static DWORD WINAPI load_plugin(void *path) {
+ loaded_plugin=LoadLibraryW(path);return loaded_plugin ? 0 : 1;
+}
 static DWORD WINAPI worker(void *unused) {(void)unused;return timeGetTime() ? 0 : 1;}
 int wmain(void) {
- HMODULE plugin=GetModuleHandleW(L"dd_engine_patch.asi");
+ wchar_t path[4096];
+ HMODULE plugin;
+ if(GetEnvironmentVariableW(L"DD_FIXTURE_DLL_PATH",path,4096)) {
+   HANDLE loader=CreateThread(NULL,0,load_plugin,path,0,NULL);
+   if(!loader)return 19;
+   WaitForSingleObject(loader,INFINITE);CloseHandle(loader);
+   plugin=loaded_plugin;
+ } else plugin=GetModuleHandleW(L"dd_engine_patch.dll");
  if(!plugin)return 10;
  volatile LONG *ready=(void*)GetProcAddress(plugin,"dd_windows_ready");
  const unsigned char *image=(const void*)GetModuleHandleW(NULL);
@@ -435,7 +247,7 @@ int wmain(void) {
  HANDLE thread=CreateThread(NULL,65536,worker,NULL,STACK_SIZE_PARAM_IS_A_RESERVATION,NULL);
  if(!thread)return 17;
  WaitForSingleObject(thread,INFINITE);CloseHandle(thread);
- puts("OWN_PROXY_FIXTURE_OK");return 0;
+ puts("OWN_DLL_FIXTURE_OK");return 0;
 }
 """)
             definitions = [
@@ -496,85 +308,113 @@ int wmain(void) {
                 )
             struct.pack_into("<H", data, pe + 6, count + 2)
             struct.pack_into("<I", data, pe + 80, fixture.data_address + 4096)
-            windows_proxy.acquire(root / "winmm.dll", Path(proxy))
-            (root / "winmm.ini").write_bytes((WINDOWS_SCRIPTS / "winmm.ini").read_bytes())
-            library = root / "dd_engine_patch.asi"
-            environment = dict(
-                os.environ, WINEDEBUG="-all", WINEDLLOVERRIDES="winmm=n,b;winemenubuilder.exe=d"
-            )
-            for case in ("matching", "configured", "signature", "guard", "rollback"):
-                with self.subTest(case=case):
-                    configuration = root / "dd_engine_patch.ini"
-                    log = root / "dd_engine_patch.log"
-                    configuration.unlink(missing_ok=True)
-                    log.unlink(missing_ok=True)
-                    if case == "configured":
-                        configuration.write_text(
-                            "[memory]\nresource_buffer_mib=64\ncache_initial_capacity=3\n"
-                            "[logging]\nlog_to_file=1\n"
-                        )
-                    candidate = bytearray(data)
-                    if case == "signature":
-                        candidate[
-                            raw + fixture.symbols["RESOURCE_0"] - fixture.code_address + 5
-                        ] ^= 1
-                    elif case == "guard":
-                        # Keep the original value; change another guarded instruction with a wildcard.
-                        fixture.header.write_text(
-                            text.replace(
-                                '"resource_0", "b9 ?? ?? ?? ?? ', '"resource_0", "?? ?? ?? ?? ?? '
+            environment = dict(os.environ, WINEDEBUG="-all")
+            for key in (
+                "DD_PATCH_CONFIG",
+                "DD_RIG_MAP",
+                "DD_PATCH_LOG",
+                "DD_LOADBUFFER_PATCH",
+                "DD_NATIVE_RENDER",
+                "DD_RIG_RUNTIME",
+                "DD_EXPECT_ORIGINAL",
+                "DD_EXPECT_CONFIGURED",
+                "DD_FIXTURE_DLL_PATH",
+            ):
+                environment.pop(key, None)
+            modes = ["dll"]
+            if proxy:
+                windows_proxy.acquire(root / "winmm.dll", Path(proxy))
+                (root / "winmm.ini").write_bytes(
+                    (windows_port.PATCH_ROOT / "scripts/windows/winmm.ini").read_bytes()
+                )
+                modes.append("winmm")
+            for mode in modes:
+                module_dir = root / "mods/引擎补丁 with spaces" if mode == "dll" else root
+                module_dir.mkdir(parents=True, exist_ok=True)
+                library = module_dir / "dd_engine_patch.dll"
+                mode_environment = dict(
+                    environment,
+                    WINEDLLOVERRIDES=("winmm=n,b;" if mode == "winmm" else "")
+                    + "winemenubuilder.exe=d",
+                )
+                if mode == "dll":
+                    mode_environment["DD_FIXTURE_DLL_PATH"] = str(library)
+                for case in ("matching", "configured", "signature", "guard", "rollback"):
+                    with self.subTest(mode=mode, case=case):
+                        configuration = module_dir / "dd_engine_patch.ini"
+                        log = module_dir / "dd_engine_patch.log"
+                        configuration.unlink(missing_ok=True)
+                        log.unlink(missing_ok=True)
+                        if case == "configured":
+                            configuration.write_text(
+                                "[memory]\nresource_buffer_mib=64\ncache_initial_capacity=3\n"
+                                "[logging]\nlog_to_file=1\n"
                             )
-                        )
-                        candidate[raw + fixture.symbols["RESOURCE_0"] - fixture.code_address] = 0xB8
-                    source = COMMON_NATIVE / "skin_rig_patch.c"
-                    if case == "rollback":
-                        fixture.header.write_text(text)
-                        source = root / "fault.c"
-                        source.write_text(
-                            """#include <windows.h>
+                        candidate = bytearray(data)
+                        if case == "signature":
+                            candidate[
+                                raw + fixture.symbols["RESOURCE_0"] - fixture.code_address + 5
+                            ] ^= 1
+                        elif case == "guard":
+                            # Keep the original value; change another guarded instruction with a wildcard.
+                            fixture.header.write_text(
+                                text.replace(
+                                    '"resource_0", "b9 ?? ?? ?? ?? ',
+                                    '"resource_0", "?? ?? ?? ?? ?? ',
+                                )
+                            )
+                            candidate[
+                                raw + fixture.symbols["RESOURCE_0"] - fixture.code_address
+                            ] = 0xB8
+                        source = COMMON_NATIVE / "skin_rig_patch.c"
+                        if case == "rollback":
+                            fixture.header.write_text(text)
+                            source = root / "fault.c"
+                            source.write_text(
+                                """#include <windows.h>
 #include <stdint.h>
 #include <string.h>
 static BOOL fault_protect(void *address,SIZE_T length,DWORD protect,DWORD *previous) {
  static int failed;
  unsigned char *base=(void*)GetModuleHandleW(NULL);
  uint32_t value;memcpy(&value,base+"""
-                            + str(fixture.symbols["RESOURCE_0"] + 1)
-                            + ''',4);
+                                + str(fixture.symbols["RESOURCE_0"] + 1)
+                                + ''',4);
  if(!failed && protect==PAGE_EXECUTE_READ && value==0x2000000){failed=1;SetLastError(ERROR_ACCESS_DENIED);return FALSE;}
  return VirtualProtect(address,length,protect,previous);
 }
 #define VirtualProtect fault_protect
 #include "'''
-                            + str(COMMON_NATIVE / "skin_rig_patch.c")
-                            + '"\n'
+                                + str(COMMON_NATIVE / "skin_rig_patch.c")
+                                + '"\n'
+                            )
+                        subprocess.run(
+                            [*common, "-shared", str(source), "-lm", "-o", str(library)], check=True
                         )
-                    subprocess.run(
-                        [*common, "-shared", str(source), "-lm", "-o", str(library)], check=True
-                    )
-                    binary.write_bytes(candidate)
-                    result = subprocess.run(
-                        [runner, str(binary)],
-                        cwd=root,
-                        env=(
-                            dict(environment, DD_EXPECT_CONFIGURED="1")
-                            if case == "configured"
-                            else environment
-                            if case == "matching"
-                            else dict(environment, DD_EXPECT_ORIGINAL="1")
-                        ),
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn("OWN_PROXY_FIXTURE_OK", result.stdout)
-                    if case == "configured":
-                        self.assertIn(
-                            "buffer_mib=64 cache_initial=3 log_to_file=1", log.read_text()
+                        binary.write_bytes(candidate)
+                        result = subprocess.run(
+                            [runner, str(binary)],
+                            cwd=root,
+                            env=(
+                                dict(mode_environment, DD_EXPECT_CONFIGURED="1")
+                                if case == "configured"
+                                else mode_environment
+                                if case == "matching"
+                                else dict(mode_environment, DD_EXPECT_ORIGINAL="1")
+                            ),
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
                         )
-                        self.assertIn("DD_PATCH_APPLIED", log.read_text())
-                    else:
-                        self.assertFalse(list(root.glob("*.log")))
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn("OWN_DLL_FIXTURE_OK", result.stdout)
+                        if case == "configured":
+                            self.assertIn(
+                                "buffer_mib=64 cache_initial=3 log_to_file=1", log.read_text()
+                            )
+                            self.assertIn("DD_PATCH_APPLIED", log.read_text())
+                        else:
+                            self.assertFalse(list(module_dir.glob("*.log")))
 
 
 if __name__ == "__main__":

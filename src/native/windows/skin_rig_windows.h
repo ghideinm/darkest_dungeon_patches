@@ -251,7 +251,7 @@ static unsigned char *windows_near_page(void) {
 }
 /* Available to debuggers and code tests, without persistent diagnostics. */
 __declspec(dllexport) const char dd_patch_identity[] =
-    "DarkestDungeonPatches.Win64.ProxyPlugin.v1";
+    "DarkestDungeonPatches.Win64.EnginePatch.v1";
 __declspec(dllexport) volatile LONG dd_windows_ready;
 __declspec(dllexport) struct {
   DWORD size;
@@ -351,10 +351,10 @@ static int windows_rig_plan(DdWindowsPatches *plan, unsigned char **allocated) {
   return 1;
 }
 
-__declspec(dllexport) void InitializeASI(void) {
+static void windows_initialize_patch(void) {
   if (InterlockedCompareExchange(&dd_patch_status.state, 1, 0))
     return;
-  dd_runtime_init((const void *)InitializeASI);
+  dd_runtime_init((const void *)windows_initialize_patch);
   base = (uintptr_t)GetModuleHandleW(NULL);
   unsigned groups =
       (windows_option("DD_LOADBUFFER_PATCH") ? DD_GROUP_RESOURCE : 0) |
@@ -421,9 +421,16 @@ rollback:
 refused:
   InterlockedExchange(&dd_patch_status.state, -1);
 }
+/* ASI loaders may call this after LoadLibrary; initialization is idempotent. */
+__declspec(dllexport) void InitializeASI(void) { windows_initialize_patch(); }
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
-  (void)instance;
   (void)reserved;
-  (void)reason;
+  if (reason == DLL_PROCESS_ATTACH) {
+    (void)DisableThreadLibraryCalls(instance);
+    /* Ordinary DLL loaders only call LoadLibrary. Finish the guarded edits
+       before returning, without spawning a thread or waiting under loader lock.
+     */
+    windows_initialize_patch();
+  }
   return TRUE;
 }

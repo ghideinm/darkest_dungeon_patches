@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from .address_scan import check_instructions, read_image, resolve, signatures
-from .paths import COMMON_NATIVE, CONFIG_SCRIPTS, PATCH_ROOT, WINDOWS_NATIVE, WINDOWS_SCRIPTS
+from .paths import COMMON_NATIVE, CONFIG_SCRIPTS, PATCH_ROOT, WINDOWS_NATIVE
 from .windows_proxy import acquire
 
 HERE = WINDOWS_NATIVE
@@ -83,75 +83,19 @@ def compile_binaries(output: Path, compiler: str | None = None, proxy: Path | No
     ]
     proxy = acquire(output / "winmm.dll", proxy)
     configuration = output / "winmm.ini"
-    shutil.copyfile(WINDOWS_SCRIPTS / "winmm.ini", configuration)
+    shutil.copyfile(PATCH_ROOT / "scripts/windows/winmm.ini", configuration)
     patch_configuration = output / "dd_engine_patch.ini"
     shutil.copyfile(CONFIG_SCRIPTS / patch_configuration.name, patch_configuration)
-    library = output / "dd_engine_patch.asi"
+    library = output / "dd_engine_patch.dll"
     subprocess.run(
         [*common, "-shared", str(COMMON_NATIVE / "skin_rig_patch.c"), "-lm", "-o", str(library)],
         check=True,
     )
-    setup = output / "dd_patch_setup.exe"
-    with tempfile.TemporaryDirectory(prefix="dd-setup-payload-") as directory:
-        temporary = Path(directory)
-        header = []
-        for name, payload in (
-            ("setup_script", (WINDOWS_SCRIPTS / "windows_install.ps1").read_bytes()),
-            ("setup_proxy", proxy.read_bytes()),
-            ("setup_config", configuration.read_bytes()),
-            ("setup_patch_config", patch_configuration.read_bytes()),
-            ("setup_library", library.read_bytes()),
-            ("setup_license", (PATCH_ROOT / "licenses/ultimate_asi_loader.txt").read_bytes()),
-        ):
-            rows = [
-                ",".join(f"0x{byte:02x}" for byte in payload[i : i + 32])
-                for i in range(0, len(payload), 32)
-            ]
-            header.append(
-                f"static const unsigned char {name}[] = {{\n" + ",\n".join(rows) + "\n};\n"
-            )
-        (temporary / "windows_setup_payload.h").write_text("".join(header))
-        manifest = temporary / "setup.manifest"
-        manifest.write_text("""<?xml version="1.0" encoding="UTF-8"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
- <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges>
-  <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
- </requestedPrivileges></security></trustInfo>
-</assembly>
-""")
-        resource = temporary / "setup.rc"
-        resource.write_text('1 24 "' + manifest.as_posix() + '"\n')
-        windres = Path(compiler).resolve().parent / "x86_64-w64-mingw32-windres"
-        if not windres.is_file():
-            # Resolve the command path before following LLVM-MinGW's symlink.
-            selected = shutil.which(str(compiler))
-            windres = Path(selected or compiler).absolute().parent / "x86_64-w64-mingw32-windres"
-        compiled_resource = temporary / "setup_resource.o"
-        subprocess.run(
-            [str(windres), "-i", str(resource), "-o", str(compiled_resource)], check=True
-        )
-        subprocess.run(
-            [
-                *common,
-                "-municode",
-                "-mwindows",
-                "-I",
-                str(temporary),
-                str(HERE / "windows_setup.c"),
-                str(compiled_resource),
-                "-lshell32",
-                "-luser32",
-                "-o",
-                str(setup),
-            ],
-            check=True,
-        )
     return {
         "proxy": str(proxy),
         "configuration": str(configuration),
         "patch_configuration": str(patch_configuration),
         "library": str(library),
-        "setup": str(setup),
     }
 
 

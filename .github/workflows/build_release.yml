@@ -37,8 +37,6 @@ jobs:
           sudo apt-get install -y clang
       - name: Offline regressions without commercial game files
         run: |
-          DD_WINDOWS_POWERSHELL="$(command -v pwsh)"
-          export DD_WINDOWS_POWERSHELL
           uv run --locked manage.py test
   build:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -83,23 +81,9 @@ jobs:
           path: ${{ runner.temp }}/release/darkest_dungeon_patches.zip
           if-no-files-found: error
           retention-days: 14
-  windows_setup:
-    needs: build
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: darkest_dungeon_patches
-          path: ${{ runner.temp }}/release
-      - name: Check self-contained EXE using Windows PowerShell
-        shell: powershell
-        run: |
-          Expand-Archive -LiteralPath "$env:RUNNER_TEMP\release\darkest_dungeon_patches.zip" -DestinationPath "$env:RUNNER_TEMP\bundle"
-          .\tests\windows\test_windows_setup.ps1 -BundleRoot "$env:RUNNER_TEMP\bundle\darkest_dungeon_patches"
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [build, windows_setup]
+    needs: build
     runs-on: ubuntu-22.04
     permissions:
       actions: read

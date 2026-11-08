@@ -30,23 +30,25 @@
 [b]仅订阅本条目或在存档中勾选它不会完成安装。请先按下面的方式安装补丁。[/b]
 
 [h2]Windows x64[/h2]
-1. 正常退出游戏。在本条目的下载目录中运行 dd_patch_setup.exe。
-2. 安装器会定位游戏，向已有的 _windows/win64 和 _windowsnosteam/win64 目录各安装 winmm.dll、dd_engine_patch.asi、winmm.ini。
-3. 安装完成后直接从 Steam 或原游戏 EXE 启动；无需 Steam 启动参数，也无需再次运行安装器。
-4. 若自动定位失败，可在 PowerShell 中指定游戏根目录：
-[code].\dd_patch_setup.exe --game-root "D:\SteamLibrary\steamapps\common\DarkestDungeon"[/code]
+两种方式任选其一。详细步骤及配置项见随包 README.md。
 
-Windows 仅支持上述两个目录的 x64 入口。首次从旧版启动器迁移时，请先正常退出 Steam。补丁默认不写磁盘日志，代理日志和崩溃转储也已关闭。
+[b]方式一：DLL Mod Loader[/b]
+按照 [url=https://github.com/InuiDame/Darkest-Dungeon-DLL-Mod-Loader]Darkest Dungeon DLL Mod Loader[/url] 的说明安装加载器，将本补丁的 dd_engine_patch.dll 与 dd_engine_patch.ini 放在游戏根目录 mods/dd_engine_patch 中，在加载器配置工具里勾选 DLL 并保存。加载器也会扫描工坊 DLL，同一补丁只保留一份启用的副本。此方式无需本包的 winmm.dll 和 winmm.ini。
+
+[b]方式二：手动安装[/b]
+正常退出游戏，先从 manual_winmm.zip 解压出 winmm.dll 和 winmm.ini，再将它们与 dd_engine_patch.dll、dd_engine_patch.ini 一起复制到实际使用的 _windows/win64 或 _windowsnosteam/win64 中，与 Darkest.exe 同级。本包 winmm.ini 已包含 LoadExtraPlugins=dd_engine_patch.dll，之后直接从 Steam 或原 EXE 启动。使用方式一时不要解压此代理 ZIP。
+
+本项目不再提供安装或启动 EXE；已有其他 Mod 的 winmm.dll 时不要直接覆盖。旧版 dd_engine_patch.asi 需要移除，避免重复加载。更早的自有 Steam 启动器需要恢复当时的 Steam 启动参数后再移除。
 
 [h2]Linux x86-64[/h2]
 1. 使用原生 Linux 游戏，关闭强制 Proton。
 2. 将下载目录里的 libdd_resource_loading_patch.so 和 libdd_skin_rig_patch.so 复制到固定目录。
 3. 按随包 README.md 的 Linux 安装步骤，在 Steam 启动选项中填写 LD_PRELOAD 和补丁环境变量。以后直接从 Steam 启动。
 
-安装后的补丁保存在游戏目录或自行指定的固定目录中；取消订阅本条目不会卸载它。更新时也需要替换 SO 或重新运行新版安装器。
+手动复制的补丁需要自行卸载；取消订阅不会删除这些副本。更新时退出游戏，替换所选方式下的 DLL 或 SO，保留自行修改的 dd_engine_patch.ini。
 
 [h1]卸载[/h1]
-[b]Windows：[/b]正常退出游戏，运行 dd_patch_setup.exe --uninstall；或手动删除两个 x64 入口中安装的 winmm.dll、dd_engine_patch.asi 和 winmm.ini。
+[b]Windows：[/b]正常退出游戏。方式一在加载器中禁用本补丁，或删除手动放入 mods/dd_engine_patch 的 DLL 与 INI。方式二删除安装的 dd_engine_patch.dll、dd_engine_patch.ini，以及只供本补丁使用的 winmm.dll、winmm.ini；共用代理时保留代理，只移除 LoadExtraPlugins 中的本补丁条目。
 [b]Linux：[/b]正常退出游戏，恢复原来的 Steam 启动选项，移除本补丁的环境变量和两个 SO 路径，之后可删除这两个 SO。
 
 [h1]下载、源码与反馈[/h1]
@@ -54,7 +56,7 @@ Windows 仅支持上述两个目录的 x64 入口。首次从旧版启动器迁�
 [url=https://space.bilibili.com/398692528][img]https://static.hdslb.com/images/favicon.png[/img][/url] [url=https://space.bilibili.com/398692528]作者 B站主页[/url]
 [url=https://github.com/ghideinm/darkest_dungeon_patches][img]https://github.githubassets.com/favicons/favicon.png[/img][/url] [url=https://github.com/ghideinm/darkest_dungeon_patches]GitHub 项目、源码与问题反馈[/url]
 
-实验版本。Linux 与 Windows 已实机验证；游戏更新后会继续尝试按唯一特征定位，指令不兼容时跳过补丁。Windows 初始化检查失败时保留未修改的游戏代码。
+实验版本。基础补丁已在 Linux 与 Windows 实机验证；本次 DLL 加载及配置改动已通过自造程序回归，仍需实机验证。游戏更新后会继续尝试按唯一特征定位，指令不兼容时跳过补丁。Windows 初始化检查失败时保留未修改的游戏代码。
 
 本补丁并非 Red Hook Studios 的官方产品或官方修改，Red Hook Studios Inc. 不对使用本补丁产生的更改或损害负责。《Darkest Dungeon》及其标志为 Red Hook Studios Inc. 的商标，游戏内容版权归 Red Hook Studios Inc. 所有。</ItemDescription>
   <PublishedFileId>3834562187</PublishedFileId>

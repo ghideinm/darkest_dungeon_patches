@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--game-root", type=Path, default=DEFAULT_GAME_ROOT)
     parser.add_argument("--windows-cc", help="Windows x64 LLVM-MinGW Clang 编译器路径")
     parser.add_argument(
-        "--windows-proxy", type=Path, help="固定版本的 x64 ASI Loader DLL；省略则构建时下载"
+        "--windows-proxy", type=Path, help="手动安装用的固定版本 x64 ASI Loader；省略则下载"
     )
     parser.add_argument("--output", type=Path, help="发布包空目录；默认使用系统临时目录")
     args = parser.parse_args()

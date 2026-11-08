@@ -4,7 +4,7 @@
 
 《暗黑地牢》Steam 版引擎补丁：**可配置的资源读取缓冲（默认 32 MiB）、原生分辨率画布、按皮肤实际 Mod 来源加载骨架**。配置后直接从 Steam 启动，无需 Python 或编译器。
 
-**实验版本：Linux x86-64、Windows x64 已实机验证。Windows 两个 x64 入口均已验证自动加载，Steam 入口已验证换肤、预览和画布。**
+**实验版本：基础补丁已在 Linux x86-64、Windows x64 实机验证；本次 DLL 加载与配置改动已通过自造程序回归，仍需实机验证。**
 
 从 [Releases](https://github.com/ghideinm/darkest_dungeon_patches/releases) 下载并解压 `darkest_dungeon_patches.zip`。补丁不包含皮肤资源，所需 Mod 请自行安装并启用。
 
@@ -29,30 +29,41 @@
 
 ### Windows
 
-1. 正常退出游戏。从旧版 Steam 启动器迁移时，也请退出 Steam 客户端。
-2. 双击 `dd_patch_setup.exe` 完成安装。
-3. 正常启动原游戏 EXE，或从 Steam 启动。
+两种方式任选其一。补丁本体是 `dd_engine_patch.dll`，默认开启全部三项功能；配置文件是 `dd_engine_patch.ini`，始终与补丁 DLL 放在一起。本项目不再提供安装或启动 EXE。
 
-安装器向游戏中已存在的 `_windows/win64`、`_windowsnosteam/win64` 目录各部署四个文件，与 `Darkest.exe` 同级：
+#### 方式一：Darkest Dungeon DLL Mod Loader
+
+1. 正常退出游戏，按照 [Darkest Dungeon DLL Mod Loader](https://github.com/InuiDame/Darkest-Dungeon-DLL-Mod-Loader) 的说明安装加载器。
+2. 在游戏根目录新建 `mods/dd_engine_patch` 文件夹，把 `dd_engine_patch.dll` 和 `dd_engine_patch.ini` 放进去。该加载器也支持扫描创意工坊中的 DLL；同一补丁只保留一份启用的副本。
+3. 打开加载器的配置工具，勾选 `dd_engine_patch.dll` 并保存，再正常启动游戏。本补丁不需要在加载器配置中额外声明 DLL 路径。
+
+该加载器使用自己的 `dbghelp.dll` 加载 Mod；使用此方式时，无需解压 `manual_winmm.zip`。手动代理收在 ZIP 中，避免被加载器扫描成另一个 Mod DLL。
+
+#### 方式二：手动安装 WinMM 代理
+
+1. 正常退出游戏。解压发布包中的 `manual_winmm.zip`，得到 `winmm.dll` 和 `winmm.ini`。打开游戏根目录中的 `_windows/win64`，将下面四个文件放在 `Darkest.exe` 旁。若使用 `_windowsnosteam/win64/Darkest.exe`，则安装到该目录；两个入口都使用时分别安装。
 
 ```text
-winmm.dll             # x64 代理加载器
-dd_engine_patch.asi   # 包含三项功能的 DLL 插件
-winmm.ini             # 代理加载器自身的日志和崩溃转储设置
-dd_engine_patch.ini   # 补丁内存与日志配置
+winmm.dll             # 第三方 Ultimate ASI Loader，x64
+winmm.ini             # 声明要加载的补丁 DLL，及代理自身的日志设置
+dd_engine_patch.dll   # 包含三项功能的补丁
+dd_engine_patch.ini   # 补丁的内存、皮肤遮掩和日志配置
 ```
 
-以后无需运行安装器，也无需设置 Steam 启动项。安装器不保留日志、脚本或安装状态文件；旧版安装记录存在时，会恢复原 Steam 启动参数并清理旧启动器。
+2. 本包的 `winmm.ini` 已包含下面的 DLL 路径声明；路径相对 `winmm.dll` 所在目录解析，不需要填写游戏绝对路径：
 
-也可以把安装器放在游戏根目录运行，或指定根目录：
-
-```powershell
-.\dd_patch_setup.exe --game-root "D:\SteamLibrary\steamapps\common\DarkestDungeon"
+```ini
+[GlobalSets]
+LoadExtraPlugins=dd_engine_patch.dll
+DebugLog=0
+DisableCrashDumps=1
 ```
 
-**更新：** 正常退出游戏，运行新版 `dd_patch_setup.exe`。已有的 `dd_engine_patch.ini` 会保留。
+3. 正常从 Steam 或原游戏 EXE 启动，无需 Steam 启动参数。
 
-已有其他 Mod 的 `winmm.dll` 时，安装器会拒绝覆盖。代理使用 [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)，许可见发布包的 `ultimate_asi_loader_license.txt`，或运行安装器的 `--license`。
+手动方式的代理来自 [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)，许可见发布包的 `ultimate_asi_loader_license.txt`。已有其他 Mod 的 `winmm.dll` 时不要直接覆盖，可选择方式一；不要让两种方式同时加载本补丁。
+
+**更新与旧版迁移：** 退出游戏，替换所选方式下的补丁 DLL，保留自己修改过的 `dd_engine_patch.ini`。旧手动方案使用 `dd_engine_patch.asi` 时，删除该旧文件，换为新 DLL，并更新本包的 `winmm.dll`、`winmm.ini`。改用方式一时，先移除原来由本补丁安装的 `winmm.dll`、`winmm.ini`、`dd_engine_patch.asi` / `dd_engine_patch.dll`；其他 Mod 的文件应保留。更早版本使用自有 Steam 启动器时，还需恢复当时的 Steam 启动参数，之后可删除旧启动器。新版不再自动改写 Steam 配置。
 
 ## 配置
 
@@ -75,7 +86,7 @@ Linux 不读取 INI 文件，`DD_PATCH_CONFIG` 也不参与配置。合并发布
 
 旧的 `DD_PATCH_LOG` 仍兼容：未设置 `DD_LOG_FILE` 时可提供日志路径；只设置旧路径会启用落盘，但显式 `DD_LOG_TO_FILE=0` 始终关闭落盘。`DD_RIG_MAP` 是旧的手工骨架映射入口，仅用于未开启 `DD_RIG_RUNTIME` 的高级模式，通常无需设置。
 
-### Windows：DLL/ASI + INI
+### Windows：DLL + INI
 
 编辑补丁二进制同目录的 `dd_engine_patch.ini`，修改后重启游戏。缺少文件时使用默认值；也可用环境变量 `DD_PATCH_CONFIG` 指定其他 INI 路径。Linux 的上述五个新参数不会覆盖 Windows 的 INI 值。
 
@@ -98,7 +109,7 @@ log_file=dd_engine_patch.log
 - `log_to_file`：默认 `0`；`1` 同时将补丁诊断追加到文件，并及时刷新。
 - `log_file`：日志路径；相对路径以 INI 所在目录为准，也可填写 UTF-8 绝对路径。目录需已存在。
 
-`winmm.ini` 独立控制 Windows 代理加载器日志和崩溃转储；`dd_engine_patch.ini` 控制补丁自身的诊断日志。没有可读 INI 时，兼容 `DD_PATCH_LOG` 日志路径。
+手动安装的 `winmm.ini` 中，`LoadExtraPlugins` 指定要加载的补丁，`DebugLog=0` 关闭代理日志，`DisableCrashDumps=1` 关闭代理崩溃转储。`dd_engine_patch.ini` 控制补丁自身的诊断日志；没有可读 INI 时，兼容 `DD_PATCH_LOG` 日志路径。方式一的加载器日志由该项目独立管理。
 
 两平台的无效值均保留默认值（INI 重复字段保留前一个有效值），原因写入调试输出。日志无法打开时补丁继续运行，且不会重定向游戏自身的标准错误输出。皮肤遮掩保留游戏原始编号和资源，支持正反向循环；原版及 DLC 资源仍可为 Mod 补齐动作。游戏和 Steam 自身的日志不受补丁日志开关控制。
 
@@ -112,19 +123,7 @@ log_file=dd_engine_patch.log
 
 ### Windows
 
-正常退出游戏，在 `dd_patch_setup.exe` 所在目录打开 PowerShell，运行：
-
-```powershell
-.\dd_patch_setup.exe --uninstall
-```
-
-安装器会自动定位游戏，删除两个 x64 入口目录内的补丁文件。需要指定游戏根目录时：
-
-```powershell
-.\dd_patch_setup.exe --uninstall --game-root "D:\SteamLibrary\steamapps\common\DarkestDungeon"
-```
-
-也可手动删除 `_windows/win64`、`_windowsnosteam/win64` 中安装的 `winmm.dll`、`dd_engine_patch.asi`、`winmm.ini` 和 `dd_engine_patch.ini`。
+正常退出游戏。方式一在加载器中取消勾选本补丁并保存，或删除手动放入 `mods/dd_engine_patch` 的 DLL 与 INI；第三方加载器本身按其项目说明卸载。方式二删除实际安装入口旁的 `dd_engine_patch.dll`、`dd_engine_patch.ini`，以及只供本补丁使用的 `winmm.dll`、`winmm.ini`。代理被其他 Mod 共用时，保留代理文件，只从 `LoadExtraPlugins` 中移除本补丁条目。
 
 ## 日志与排错
 
@@ -135,5 +134,5 @@ log_file=dd_engine_patch.log
 
 - 游戏更新后仍默认尝试加载，不按版本号或 EXE 哈希限制；特征不兼容时记录原因并跳过补丁。
 - Linux 未生效时，检查 SO 绝对路径、开关和日志目录权限，确认未使用 Proton。
-- Windows 仅支持上述两个目录中的 x64 EXE；旧版迁移提示 Steam 正在运行时，请从客户端菜单正常退出。
+- Windows 仅支持上述两个目录中的 x64 EXE。手动方式不生效时，检查 `winmm.ini` 的 `LoadExtraPlugins` 和四个文件的位置；方式一检查加载器是否勾选了补丁。仅复制普通 DLL 到 EXE 旁不会自动加载。
 - 提交 Issue 时提供操作系统、补丁版本、复现步骤及相关日志即可。

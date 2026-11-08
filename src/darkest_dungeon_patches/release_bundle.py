@@ -45,6 +45,13 @@ def build(
     shutil.copyfile(
         HERE / "licenses/ultimate_asi_loader.txt", root / "ultimate_asi_loader_license.txt"
     )
+    # DLL Mod Loader recursively scans Mod directories. Keep the optional WinMM
+    # proxy inside an archive so it cannot be mistaken for another Mod DLL.
+    with zipfile.ZipFile(root / "manual_winmm.zip", "w", zipfile.ZIP_DEFLATED) as manual:
+        for name in ("winmm.dll", "winmm.ini"):
+            manual.write(root / name, name)
+    for name in ("winmm.dll", "winmm.ini"):
+        (root / name).unlink()
     files = sorted(path for path in root.iterdir() if path.is_file())
     (root / "SHA256SUMS").write_text(
         "".join(
@@ -59,7 +66,7 @@ def build(
         "directory": str(root),
         "archive": str(archive),
         "files": [path.name for path in sorted(root.iterdir())],
-        "windows_setup": windows["setup"],
+        "windows_library": windows["library"],
         "game_files_required": False,
         "runtime_verified": False,
     }
