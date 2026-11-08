@@ -306,6 +306,16 @@ int main(void) {
   memcpy(klass+0x5e0,&palettes,sizeof(palettes));
   memcpy(klass+0x5e8,&end,sizeof(end));
   assert(windows_colour_count(klass)==600);
+  SkinSource choices[4]={0};
+  strcpy(choices[1].origin,"C:/GAME/DLC/official/");
+  strcpy(choices[2].origin,"C:/Game/mods/dlc_theme/");
+  strcpy(choices[3].origin,"mods/other/");
+  SkinCatalog catalog={.count=4,.entries=choices};
+  assert(palette_official_source(choices[1].origin,"c:/game"));
+  assert(!palette_official_source(choices[2].origin,"c:/game"));
+  assert(visible_catalog_colour(&catalog,0,3,"c:/game")==2);
+  assert(visible_catalog_colour(&catalog,1,2,"c:/game")==3);
+  assert(visible_catalog_colour(&catalog,2,3,"c:/game")==2);
   unsigned char device[0x20]={0};
   void *roots=calloc(4200,0x210);assert(roots);end=(char*)roots+4200*0x210;
   memcpy(device+8,&roots,sizeof(roots));memcpy(device+16,&end,sizeof(end));

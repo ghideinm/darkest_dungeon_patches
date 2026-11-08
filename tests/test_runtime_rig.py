@@ -346,6 +346,17 @@ static void *fixture_realloc(void *data, size_t size) {
         cls.library.dd_runtime_test_saved_route.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         cls.library.dd_runtime_test_saved_route.restype = ctypes.c_int
         cls.library.dd_runtime_test_allocation_budget.argtypes = [ctypes.c_int]
+        cls.library.dd_runtime_test_hide_vanilla.argtypes = [ctypes.c_int]
+        cls.library.dd_runtime_test_visible_colour.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        cls.library.dd_runtime_test_visible_colour.restype = ctypes.c_int
+        cls.library.dd_runtime_test_bind_colour.argtypes = [ctypes.c_void_p]
+        cls.library.dd_runtime_test_change_colour.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        cls.library.dd_runtime_test_actor_skin.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        cls.library.dd_runtime_test_actor_skin.restype = ctypes.c_char_p
 
     def setUp(self):
         super().setUp()
@@ -471,8 +482,9 @@ static void *fixture_realloc(void *data, size_t size) {
         )
         self.Vector, self.Handle, self.callback = Vector, Handle, callback
 
-    def bind_catalog(self, roots=None, preserve_sources=False):
+    def bind_catalog(self, roots=None, preserve_sources=False, base_names=None):
         ptr = ctypes.c_void_p
+        self.base_names = base_names if base_names is not None else [f"alpha_{c}" for c in "ABCD"]
         # Archive-backed Mod indices omit the trailing directory separator;
         # the base Linux directory enumeration includes it. Keep both entries.
         self.root_specs = (
@@ -484,7 +496,7 @@ static void *fixture_realloc(void *data, size_t size) {
             f"heroes/alpha/alpha_{c}/" for c in "ABCDE"
         ]
         if preserve_sources:
-            self.native_paths = [f"heroes/alpha/alpha_{c}/" for c in "ABCD"] + [
+            self.native_paths = [f"heroes/alpha/{name}/" for name in self.base_names] + [
                 f"heroes/alpha/{name}/" for _, names in reversed(self.root_specs) for name in names
             ]
         self.path_buffers = [ctypes.create_string_buffer(p.encode()) for p in self.native_paths]
@@ -511,7 +523,7 @@ static void *fixture_realloc(void *data, size_t size) {
 
         def match(target, device, directory, pattern, details, depth, flags):
             self.assertEqual((directory, details, depth, flags), (b"heroes/alpha/", 0, 0, 0))
-            fill(target, [f"alpha_{c}" + ("" if preserve_sources else "/") for c in "ABCD"])
+            fill(target, [name + ("" if preserve_sources else "/") for name in self.base_names])
 
         def archive(device, target, directory, pattern, details, depth, include):
             fill(target, self.root_specs[device - 1][1])
@@ -588,6 +600,96 @@ static void *fixture_realloc(void *data, size_t size) {
         self.bind_catalog()
         self.path_buffers[0], self.path_buffers[1] = self.path_buffers[1], self.path_buffers[0]
         self.assertIsNone(self.library.dd_runtime_test_source(0x55, 0))
+
+    def test_visibility_skips_base_and_dlc_in_both_directions_without_renumbering(self):
+        self.bind_catalog(
+            roots=[
+                ("mods/second/", ["alpha_A"]),
+                ("dlc/official/", [f"alpha_{c}" for c in "ABCD"]),
+                ("mods/first/", ["alpha_A", "alpha_E"]),
+            ],
+            preserve_sources=True,
+        )
+        before = [buffer.raw for buffer in self.path_buffers]
+        choose = self.library.dd_runtime_test_visible_colour
+        self.assertEqual(choose(0x55, 0, 0), 0)
+        self.library.dd_runtime_test_hide_vanilla(1)
+        visible = (4, 5, 10)
+        for current in range(11):
+            for requested in range(11):
+                self.assertIn(choose(0x55, requested, current), visible)
+        self.assertEqual(choose(0x55, 0, 10), 4)
+        self.assertEqual(choose(0x55, 6, 5), 10)
+        self.assertEqual(choose(0x55, 3, 4), 10)
+        self.assertEqual(choose(0x55, 9, 10), 5)
+        self.assertEqual([buffer.raw for buffer in self.path_buffers], before)
+        self.assertEqual(
+            [self.library.dd_runtime_test_source(0x55, i) for i in visible],
+            [b"mods/first/", b"mods/first/", b"mods/second/"],
+        )
+        self.library.dd_runtime_test_hide_vanilla(0)
+        self.assertEqual(choose(0x55, 0, 10), 0)
+
+    def test_visibility_preserves_unmodded_and_dlc_only_classes(self):
+        self.library.dd_runtime_test_hide_vanilla(1)
+        self.bind_catalog(
+            roots=[("mods/unrelated/", []), ("dlc/official/", ["alpha_A", "alpha_B"])],
+            preserve_sources=True,
+        )
+        for i in range(6):
+            self.assertEqual(self.library.dd_runtime_test_visible_colour(0x55, i, (i + 5) % 6), i)
+        self.bind_catalog(
+            roots=[("dlc/official/", ["alpha_A", "alpha_B"])], preserve_sources=True, base_names=[]
+        )
+        self.assertEqual(self.library.dd_runtime_test_visible_colour(0x55, 0, 1), 0)
+        self.assertEqual(self.library.dd_runtime_test_visible_colour(0x55, 1, 0), 1)
+        absolute = str(self.root / "dlc" / "official") + "/"
+        self.bind_catalog(roots=[(absolute, ["alpha_A"])], preserve_sources=True, base_names=[])
+        self.assertEqual(self.library.dd_runtime_test_source(0x55, 0), absolute.encode())
+        self.assertEqual(self.library.dd_runtime_test_visible_colour(0x55, 0, 0), 0)
+
+    def test_linux_shared_palette_index_uses_mod_provider_only_when_enabled(self):
+        self.bind_catalog(roots=[("mods/second/", ["alpha_A/"]), ("mods/first/", ["alpha_A/"])])
+        self.path_buffers = [
+            ctypes.create_string_buffer(f"heroes/alpha/alpha_{c}//".encode()) for c in "ABCD"
+        ]
+        self.assertEqual(self.library.dd_runtime_test_source(0x55, 0), b"")
+        self.library.dd_runtime_test_hide_vanilla(1)
+        self.assertEqual(self.library.dd_runtime_test_source(0x55, 0), b"mods/first/")
+        for i in range(4):
+            self.assertEqual(self.library.dd_runtime_test_visible_colour(0x55, i, 0), 0)
+        self.library.dd_runtime_test_hide_vanilla(0)
+        self.assertEqual(self.library.dd_runtime_test_source(0x55, 0), b"")
+
+    def test_initial_route_preview_and_colour_setter_choose_mod_skin(self):
+        self.bind_catalog(
+            roots=[("dlc/official/", ["alpha_A"]), ("mods/chosen/", ["alpha_E", "alpha_F"])],
+            preserve_sources=True,
+        )
+        self.library.dd_runtime_test_hide_vanilla(1)
+        self.rig("mods/chosen/heroes/alpha/anim", pages=("idle.png",))
+        for suffix in "EF":
+            self.texture("mods/chosen/", f"heroes/alpha/alpha_{suffix}", "idle.png")
+        actor = ctypes.create_string_buffer(0xC00)
+        table = (ctypes.c_void_p * 8)()
+        get_class = self.callback(ctypes.c_void_p, [ctypes.c_void_p], lambda unused: 0x55)
+        table[7] = ctypes.cast(get_class, ctypes.c_void_p).value
+        struct.pack_into("<Q", actor, 0, ctypes.addressof(table))
+        applied = []
+
+        def apply(target, colour):
+            applied.append(colour)
+            ctypes.c_int.from_address(target + 0xB68).value = colour
+
+        setter = self.callback(None, [ctypes.c_void_p, ctypes.c_int], apply)
+        self.library.dd_runtime_test_bind_colour(setter)
+        # Actor creation and previews both use this resolver, while retaining the saved index.
+        self.assertEqual(self.library.dd_runtime_test_actor_skin(actor, 0), b"heroes/alpha/alpha_E")
+        self.assertEqual(struct.unpack_from("<i", actor, 0xB68)[0], 0)
+        for requested, expected in ((0, 4), (5, 5), (6, 4), (3, 5)):
+            self.library.dd_runtime_test_change_colour(actor, requested)
+            self.assertEqual(applied[-1], expected)
+            self.assertEqual(struct.unpack_from("<i", actor, 0xB68)[0], expected)
 
     def test_windows_catalog_keeps_base_and_two_workshop_sources_with_identical_names(self):
         first = "C:/Steam/steamapps/workshop/content/262060/101/"

@@ -98,11 +98,12 @@ int main(void) {
             custom = override / "settings.ini"
             custom.write_text(
                 "[memory]\nresource_buffer_mib=48\n[logging]\nlog_to_file=1\n"
-                "log_file=指定日志.log\n"
+                "log_file=指定日志.log\n[skins]\nhide_vanilla_skins=1\n"
             )
             result = self.run_fixture(binary, work, windows, DD_PATCH_CONFIG=str(custom))
             self.assertEqual(result.stdout.strip(), "48 16 1")
             self.assertIn("OWN_CONFIG_LOG_MARKER", (override / "指定日志.log").read_text())
+            self.assertIn("hide_vanilla_skins=1", (override / "指定日志.log").read_text())
 
     def test_module_relative_config_and_utf8_logs(self):
         self.exercise_module_config(False)
@@ -155,3 +156,16 @@ int main(void) {
             result = self.run_fixture(binary, root)
             self.assertEqual(result.stdout.strip(), "48 16 0")
             self.assertIn("DD_PATCH_CONFIG_INVALID fields=1", result.stderr)
+
+    def test_skin_visibility_option_is_explicit_and_validated(self):
+        with tempfile.TemporaryDirectory(prefix="dd-config-skins-") as directory:
+            root = Path(directory)
+            binary = self.compile(root)
+            config = root / "dd_engine_patch.ini"
+            for value in ("0", "1", "2", "-1", "true"):
+                config.write_text("[skins]\nhide_vanilla_skins=" + value + "\n")
+                result = self.run_fixture(binary, root)
+                self.assertIn("hide_vanilla_skins=" + ("1" if value == "1" else "0"), result.stderr)
+                self.assertEqual(
+                    "DD_PATCH_CONFIG_INVALID" in result.stderr, value not in ("0", "1")
+                )

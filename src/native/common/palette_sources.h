@@ -23,6 +23,45 @@ static inline int file_match_count(const NativeFileMatch *files,
   return 1;
 }
 
+static inline unsigned char palette_path_char(unsigned char c) {
+  if (c == '\\')
+    return '/';
+#ifdef _WIN32
+  if (c >= 'A' && c <= 'Z')
+    return (unsigned char)(c + ('a' - 'A'));
+#endif
+  return c;
+}
+/* Only the base device and the game's own dlc/ subtree are official. A user
+ * Mod with a nested directory called dlc is still a user Mod. */
+static inline int palette_official_source(const char *origin,
+                                          const char *game_root) {
+  if (!origin || !*origin)
+    return 1;
+  const char *relative = origin;
+  if (game_root && *game_root) {
+    size_t n = strlen(game_root);
+    while (n && palette_path_char((unsigned char)game_root[n - 1]) == '/')
+      --n;
+    size_t i = 0;
+    while (i < n && origin[i] &&
+           palette_path_char((unsigned char)origin[i]) ==
+               palette_path_char((unsigned char)game_root[i]))
+      ++i;
+    if (n && i == n && palette_path_char((unsigned char)origin[i]) == '/')
+      relative = origin + i + 1;
+  }
+  while (relative[0] == '.' &&
+         palette_path_char((unsigned char)relative[1]) == '/')
+    relative += 2;
+  const char *prefix = "dlc/";
+  for (size_t i = 0; prefix[i]; ++i)
+    if (palette_path_char((unsigned char)relative[i]) !=
+        (unsigned char)prefix[i])
+      return 0;
+  return 1;
+}
+
 #if defined(_WIN32) || defined(DD_PALETTE_SOURCES_TEST)
 typedef void (*PaletteRootMatch)(void *, NativeFileMatch *, void *, unsigned,
                                  const char *, const char *, int, int, int);

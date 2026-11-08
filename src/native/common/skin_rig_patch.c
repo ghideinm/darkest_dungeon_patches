@@ -484,6 +484,7 @@ typedef struct {
 static SkinCatalog **catalogs;
 static size_t catalog_count, catalog_capacity;
 #ifdef DD_RIG_RUNTIME_TEST
+static void change_colour(void *, int);
 static void clear_catalogs(void) {
   for (size_t i = 0; i < catalog_count; ++i) {
     free(catalogs[i]->entries);
@@ -511,7 +512,7 @@ static uint64_t hash_bytes(uint64_t hash, const void *bytes, size_t count) {
 }
 static int add_catalog_files(SkinCatalog *catalog, size_t limit,
                              const NativeFileMatch *files, const char *hero,
-                             const char *origin) {
+                             const char *origin, const char *game_root) {
   size_t count;
   if (!file_match_count(files, &count))
     return 0;
@@ -527,8 +528,18 @@ static int add_catalog_files(SkinCatalog *catalog, size_t limit,
           (!preserve_palette_sources ||
            !strcmp(catalog->entries[j].origin, origin)))
         break;
-    if (j != catalog->count)
+    if (j != catalog->count) {
+      /* Linux merges identical raw names. When masking official choices,
+       * route that shared index to the first (highest-priority) Mod provider.
+       */
+      if (dd_config.hide_vanilla_skins && !preserve_palette_sources &&
+          *game_root &&
+          palette_official_source(catalog->entries[j].origin, game_root) &&
+          !palette_official_source(origin, game_root))
+        snprintf(catalog->entries[j].origin, sizeof(catalog->entries[j].origin),
+                 "%s", origin);
       continue;
+    }
     if (catalog->count == limit)
       return 0;
     SkinSource *entry = catalog->entries + catalog->count++;
@@ -569,6 +580,8 @@ static const SkinCatalog *source_catalog(void *klass) {
   if (n < 0 || (size_t)n >= sizeof(pattern))
     return NULL;
   uint64_t signature = UINT64_C(14695981039346656037);
+  signature = hash_bytes(signature, &dd_config.hide_vanilla_skins,
+                         sizeof(dd_config.hide_vanilla_skins));
   for (unsigned i = 0; i < count; ++i) {
     const char *path = colour_path(klass, i);
     if (!path || strnlen(path, 512) == 512)
@@ -596,8 +609,11 @@ static const SkinCatalog *source_catalog(void *klass) {
     return NULL;
   }
   NativeFileMatch files = {0};
+  char game_root[4096] = {0};
+  if (!getcwd(game_root, sizeof(game_root)))
+    *game_root = 0;
   match_device(&files, device, directory, pattern, 0, 0, 0);
-  int valid = add_catalog_files(&catalog, count, &files, hero, "");
+  int valid = add_catalog_files(&catalog, count, &files, hero, "", game_root);
   destroy_match(&files);
   /* IO_FindFiles enumerates the base device first, then alternate roots in
    * reverse order. Keep the origin before its duplicate-name merge loses it. */
@@ -618,7 +634,7 @@ static const SkinCatalog *source_catalog(void *klass) {
       match_device(&files, delegate ? delegate : device, full, pattern, 0, 0,
                    0);
     }
-    valid = add_catalog_files(&catalog, count, &files, hero, origin);
+    valid = add_catalog_files(&catalog, count, &files, hero, origin, game_root);
     destroy_match(&files);
   }
   if (catalog.count != count)
@@ -660,6 +676,43 @@ static const SkinCatalog *source_catalog(void *klass) {
   *owned = catalog;
   catalogs[catalog_count++] = owned;
   return owned;
+}
+static int visible_catalog_colour(const SkinCatalog *catalog, int requested,
+                                  int current, const char *game_root) {
+  size_t count = catalog->count;
+  if (!count || count > INT_MAX)
+    return requested;
+  size_t index =
+      requested >= 0 && (size_t)requested < count ? (size_t)requested : 0;
+  int backwards = current >= 0 && (size_t)current < count && requested >= 0 &&
+                  (size_t)requested < count &&
+                  index == ((size_t)current + count - 1) % count;
+  for (size_t checked = 0; checked < count; ++checked) {
+    if (!palette_official_source(catalog->entries[index].origin, game_root))
+      return (int)index;
+    index = backwards ? (index ? index - 1 : count - 1) : (index + 1) % count;
+  }
+  return requested; /* An unmodded class retains every official choice. */
+}
+static int masked_catalog_colour(void *actor, const SkinCatalog *catalog,
+                                 int requested) {
+  if (!dd_config.hide_vanilla_skins)
+    return requested;
+  char game_root[4096];
+  if (!getcwd(game_root, sizeof(game_root)))
+    return requested;
+  int selected = visible_catalog_colour(catalog, requested,
+                                        int_at(actor, 0xb68), game_root);
+  if (selected != requested)
+    dprintf(2, "DD_RIG_COLOUR_MASKED actor=%p requested=%d selected=%d\n",
+            actor, requested, selected);
+  return selected;
+}
+static int skin_colour(void *actor, int requested) {
+  if (!runtime_enabled || !dd_config.hide_vanilla_skins)
+    return requested;
+  const SkinCatalog *catalog = source_catalog(actor_class(actor));
+  return catalog ? masked_catalog_colour(actor, catalog, requested) : requested;
 }
 static int runtime_actor(void *actor) {
   void *klass = actor_class(actor);
@@ -881,6 +934,9 @@ static const Route *find_route(void *actor, int colour) {
     const SkinCatalog *catalog = source_catalog(klass);
     if (!catalog || (unsigned)colour >= catalog->count)
       return NULL;
+    colour = masked_catalog_colour(actor, catalog, colour);
+    if (colour < 0 || (size_t)colour >= catalog->count)
+      return NULL;
     const SkinSource *source = catalog->entries + colour;
     return runtime_route(source->skin, source->origin);
   }
@@ -1078,6 +1134,8 @@ void dd_runtime_test_bind(
   native_symbols.values[DD_RESOURCE] = 0x31c2b58;
   clear_routes();
   clear_catalogs();
+  dd_config.hide_vanilla_skins = 0;
+  runtime_enabled = 0;
   preserve_palette_sources = 0;
   alternate_count = NULL;
   override_route = NULL;
@@ -1142,6 +1200,29 @@ const char *dd_runtime_test_source(void *klass, unsigned index) {
   const SkinCatalog *catalog = source_catalog(klass);
   return catalog && index < catalog->count ? catalog->entries[index].origin
                                            : NULL;
+}
+void dd_runtime_test_hide_vanilla(int enabled) {
+  dd_config.hide_vanilla_skins = enabled;
+}
+int dd_runtime_test_visible_colour(void *klass, int requested, int current) {
+  const SkinCatalog *catalog = source_catalog(klass);
+  char game_root[4096];
+  if (!catalog || !dd_config.hide_vanilla_skins ||
+      !getcwd(game_root, sizeof(game_root)))
+    return requested;
+  return visible_catalog_colour(catalog, requested, current, game_root);
+}
+void dd_runtime_test_bind_colour(void (*apply)(void *, int)) {
+  original_colour = apply;
+  runtime_enabled = 1;
+  native_symbols.values[DD_ACTOR_SPRITE_FIELD] = 0x100;
+}
+void dd_runtime_test_change_colour(void *actor, int colour) {
+  change_colour(actor, colour);
+}
+const char *dd_runtime_test_actor_skin(void *actor, int colour) {
+  const Route *route = find_route(actor, colour);
+  return route ? route->skin : NULL;
 }
 #endif
 #ifdef _WIN32
@@ -1229,6 +1310,7 @@ static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
   return sprite;
 }
 static void change_colour(void *actor, int colour) {
+  colour = skin_colour(actor, colour);
   const Route *route = find_route(actor, colour);
   void *old = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
   if (!route && runtime_enabled && runtime_actor(actor))

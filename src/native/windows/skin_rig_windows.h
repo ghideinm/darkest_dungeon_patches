@@ -147,6 +147,7 @@ static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
   return sprite;
 }
 static void change_colour(void *actor, int colour) {
+  colour = skin_colour(actor, colour);
   const Route *route = find_route(actor, colour);
   void *old = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
   if (!route && runtime_actor(actor))

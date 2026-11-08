@@ -26,8 +26,9 @@ typedef struct {
   size_t cache_initial_capacity;
   int log_to_file;
   char log_file[4096];
+  int hide_vanilla_skins;
 } DdPatchConfig;
-static DdPatchConfig dd_config = {32, 16, 0, "dd_engine_patch.log"};
+static DdPatchConfig dd_config = {32, 16, 0, "dd_engine_patch.log", 0};
 static int dd_config_initialized;
 static FILE *dd_log_file;
 
@@ -131,6 +132,12 @@ static inline unsigned dd_config_read(FILE *file, DdPatchConfig *config,
     } else if (!strcmp(section, "logging") && !strcmp(key, "log_file")) {
       if (!*value ||
           !dd_copy(config->log_file, sizeof(config->log_file), value))
+        ++invalid;
+    } else if (!strcmp(section, "skins") &&
+               !strcmp(key, "hide_vanilla_skins")) {
+      if (dd_config_number(value, 0, 1, &number))
+        config->hide_vanilla_skins = (int)number;
+      else
         ++invalid;
     }
   }
@@ -288,9 +295,10 @@ static inline void dd_runtime_init(const void *anchor) {
                  config_path);
   dd_patch_log(2,
                "DD_PATCH_CONFIG buffer_mib=%u cache_initial=%zu log_to_file=%d "
-               "path=%s\n",
+               "hide_vanilla_skins=%d path=%s\n",
                dd_config.resource_buffer_mib, dd_config.cache_initial_capacity,
-               dd_config.log_to_file, config_found ? config_path : "defaults");
+               dd_config.log_to_file, dd_config.hide_vanilla_skins,
+               config_found ? config_path : "defaults");
 }
 static inline uint32_t dd_resource_buffer_bytes(void) {
   return dd_config.resource_buffer_mib * DD_MIB;

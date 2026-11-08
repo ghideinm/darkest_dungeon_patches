@@ -63,6 +63,9 @@ dd_engine_patch.ini   # 补丁内存与日志配置
 resource_buffer_mib=32
 cache_initial_capacity=16
 
+[skins]
+hide_vanilla_skins=0
+
 [logging]
 log_to_file=0
 log_file=dd_engine_patch.log
@@ -70,6 +73,7 @@ log_file=dd_engine_patch.log
 
 - `resource_buffer_mib`：每个资源读取缓冲的大小，单位 MiB，使用系统内存。允许范围为 Linux 6–2047、Windows 16–2047；分配大小与读取检查同步修改。
 - `cache_initial_capacity`：皮肤方案、职业目录缓存各自的初始条目数。容量不足时继续翻倍扩容，不是条目上限。
+- `hide_vanilla_skins`：设为 `1` 后，某职业有 Mod 皮肤时，换肤、角色创建和预览优先使用 Mod 皮肤，切换时跳过该职业全部原版及官方 DLC 皮肤。没有 Mod 皮肤的职业保留原版选择。默认 `0` 保持现有行为；需要启用动态骨架功能。保留游戏原始皮肤编号和资源，支持正反向循环；原版及 DLC 资源仍可为 Mod 补齐动作。
 - `log_to_file`：`0` 只输出调试信息；`1` 同时将补丁诊断追加到文件，并及时刷新。默认关闭落盘。
 - `log_file`：日志路径；相对路径以配置文件所在目录为基准，也可填写 UTF-8 绝对路径。目录需已存在。日志无法打开时补丁继续运行。
 
