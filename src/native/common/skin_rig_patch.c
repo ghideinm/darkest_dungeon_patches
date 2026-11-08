@@ -709,6 +709,16 @@ static int masked_catalog_colour(void *actor, const SkinCatalog *catalog,
   return selected;
 }
 static int skin_colour(void *actor, int requested) {
+  /* Keep cycling independent of masking. Preserve negative native sentinel
+   * values, but normalize a caller's last+1 before resolving its skeleton. */
+  unsigned count = colour_count(actor_class(actor));
+  if (requested >= 0 && count && count <= INT_MAX &&
+      (unsigned)requested >= count) {
+    int wrapped = requested % (int)count;
+    dprintf(2, "DD_RIG_COLOUR_WRAPPED actor=%p requested=%d selected=%d\n",
+            actor, requested, wrapped);
+    requested = wrapped;
+  }
   if (!runtime_enabled || !dd_config.hide_vanilla_skins)
     return requested;
   const SkinCatalog *catalog = source_catalog(actor_class(actor));
@@ -1337,10 +1347,17 @@ static void change_colour(void *actor, int colour) {
   bool (*has_animation)(void *, const char *) =
       (void *)(native_address(DD_HAS_ANIMATION));
   if (!has_animation(sprite, name[0] ? name : "idle")) {
-    discard_sprite(sprite);
-    dprintf(2, "DD_RIG_SKIN_REFUSED_ANIMATION actor=%p animation=%s\n", actor,
-            name);
-    return;
+    if (name[0] && strcmp(name, "idle") && has_animation(sprite, "idle")) {
+      dprintf(2, "DD_RIG_SKIN_ANIMATION_FALLBACK actor=%p from=%s to=idle\n",
+              actor, name);
+      memcpy(name, "idle", sizeof("idle"));
+      time = 0;
+    } else {
+      discard_sprite(sprite);
+      dprintf(2, "DD_RIG_SKIN_REFUSED_ANIMATION actor=%p animation=%s\n", actor,
+              name);
+      return;
+    }
   }
   void (*set_sprite)(void *, void *) = (void *)(native_address(DD_SET_SPRITE));
   set_sprite(actor, sprite);

@@ -169,10 +169,18 @@ static void change_colour(void *actor, int colour) {
   if (!sprite)
     return;
   if (!windows_has_animation(sprite, *name ? name : "idle")) {
-    discard_sprite(sprite);
-    dprintf(2, "DD_RIG_SKIN_REFUSED_ANIMATION actor=%p animation=%s\n", actor,
-            name);
-    return;
+    if (*name && strcmp(name, "idle") &&
+        windows_has_animation(sprite, "idle")) {
+      dprintf(2, "DD_RIG_SKIN_ANIMATION_FALLBACK actor=%p from=%s to=idle\n",
+              actor, name);
+      memcpy(name, "idle", sizeof("idle"));
+      time = 0;
+    } else {
+      discard_sprite(sprite);
+      dprintf(2, "DD_RIG_SKIN_REFUSED_ANIMATION actor=%p animation=%s\n", actor,
+              name);
+      return;
+    }
   }
   /* MSVC's two event hash containers own heap sentinels, with no embedded
    * self pointers. Transfer their ownership as a pair, including dirty state,
