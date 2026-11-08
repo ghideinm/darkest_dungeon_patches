@@ -188,6 +188,12 @@ static const char *resource_key(void *manager,const Handle *handle) {
   (void)manager;(void)handle;return "prefix.idle.skel";
 }
 int main(void) {
+  dd_config.cache_initial_capacity=3;
+  Route initial={0};
+  assert(append_route(&initial) && route_capacity == 3);
+  for (unsigned i=0;i<3;++i) assert(append_route(&initial));
+  assert(route_capacity == 6);
+  clear_routes();
   FILE *map = tmpfile();
   assert(map);
   for (unsigned i=0;i<320;++i)
@@ -225,7 +231,7 @@ int main(void) {
   assert(!file_match_count(&invalid,&count));
   free(files.begin);
   size_t capacity = 0;
-  assert(!grow_array(NULL,&capacity,SIZE_MAX,sizeof(RigEntry)) && !capacity);
+  assert(!grow_array(NULL,&capacity,SIZE_MAX,sizeof(RigEntry),16) && !capacity);
   RigPlan plan = {0};
   for (unsigned i=0;i<300;++i) {
     snprintf(name,sizeof(name),">heroes/alpha/action_%03u.skel",i);

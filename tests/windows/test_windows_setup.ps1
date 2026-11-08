@@ -44,13 +44,16 @@ try{
     Assert ($first.Code -eq 0) ('Installation failed: '+$first.Text+$first.ErrorText)
     foreach($sub in $folders){
         $dir=Join-Path $game $sub
-        Assert (@(Get-ChildItem -LiteralPath $dir -File).Count -eq 4) 'Installed files exceed EXE plus two DLLs and proxy configuration.'
-        foreach($name in @('winmm.dll','dd_engine_patch.asi','winmm.ini')){
+        Assert (@(Get-ChildItem -LiteralPath $dir -File).Count -eq 5) 'Installed files exceed EXE plus two DLLs and two configurations.'
+        foreach($name in @('winmm.dll','dd_engine_patch.asi','winmm.ini','dd_engine_patch.ini')){
             Assert ((Get-FileHash (Join-Path $dir $name)).Hash -eq (Get-FileHash (Join-Path $BundleRoot $name)).Hash) 'Installed payload mismatch.'
         }
     }
+    $custom=Join-Path (Join-Path $game $folders[0]) 'dd_engine_patch.ini'
+    [IO.File]::WriteAllText($custom,"[memory]`nresource_buffer_mib=64`n")
     $again=Invoke-Native $setup $options
     Assert ($again.Code -eq 0) 'Idempotent update failed.'
+    Assert ([IO.File]::ReadAllText($custom) -ceq "[memory]`nresource_buffer_mib=64`n") 'Update replaced custom patch settings.'
     $status=Invoke-Native $setup ('--status '+$options)
     Assert ($status.Code -eq 0) 'Status failed.'
     Assert (@(($status.Text|ConvertFrom-Json).targets|Where-Object {-not $_.installed}).Count -eq 0) 'Status lost an installed entry.'

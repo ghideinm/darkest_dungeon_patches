@@ -117,6 +117,11 @@ class PreloadCompatibilityTest(unittest.TestCase):
                     self.assertEqual(previous_header, fixture.header.read_bytes())
                 work = root / str(index)
                 work.mkdir()
+                expected_capacity = (32 if index == 0 else 64) * 1024 * 1024
+                if index == 1:
+                    (root / "dd_engine_patch.ini").write_text(
+                        "[memory]\nresource_buffer_mib=64\ncache_initial_capacity=3\n"
+                    )
                 (work / "code.bin").write_bytes(fixture.code)
                 (work / "data.bin").write_bytes(fixture.data)
                 assembly = work / "sections.s"
@@ -133,7 +138,7 @@ class PreloadCompatibilityTest(unittest.TestCase):
                     + "".join(
                         "if(*(const uint32_t *)(uintptr_t)"
                         + str(fixture.symbols[f"RESOURCE_{i}"] + 1)
-                        + " != 0x2000000) return 2;\n"
+                        + f" != {expected_capacity}) return 2;\n"
                         for i in range(7)
                     )
                     + "".join(

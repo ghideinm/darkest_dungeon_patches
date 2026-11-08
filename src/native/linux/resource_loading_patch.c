@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
+#include "../common/patch_config.h"
 #include "linux_patch.h"
-#include "linux_runtime.h"
+#define dprintf dd_patch_log
 #include <elf.h>
 #include <link.h>
 #include <stdint.h>
@@ -11,7 +12,7 @@
 #include <unistd.h>
 
 /* Candidate instruction offsets. Only immediate operands change. */
-enum { OLD_CAP = 0x600000, NEW_CAP = 0x2000000, SITE_COUNT = 7 };
+enum { OLD_CAP = 0x600000, SITE_COUNT = 7 };
 #ifdef DD_PATCH_SELFTEST
 static const uintptr_t sites[SITE_COUNT] = {0x0ffe, 0x1100, 0x1110, 0x1120,
                                             0x1130, 0x1140, 0x1150};
@@ -26,7 +27,7 @@ static uintptr_t site_address(const struct image *image, DdSymbol symbol) {
 static int apply_patch(const struct image *image) {
   unsigned char expected[SITE_COUNT][5], replacement[SITE_COUNT][5];
   DdMemoryPatch patches[SITE_COUNT];
-  const uint32_t cap = NEW_CAP;
+  const uint32_t cap = dd_resource_buffer_bytes();
   for (size_t i = 0; i < SITE_COUNT; ++i) {
     const unsigned char original[5] = {i == 6 ? 0xb9 : 0xbf, 0, 0, 0x60, 0};
     memcpy(expected[i], original, 5);
@@ -98,7 +99,7 @@ __attribute__((constructor)) static void initialize(void) {
   const char *name = strrchr(executable, '/');
   if (!name || strcmp(name + 1, "darkest.bin.x86_64"))
     return;
-  dd_linux_log();
+  dd_runtime_init((const void *)initialize);
   struct image image = {0};
   if (!dd_linux_image(&image.native)) {
     dprintf(STDERR_FILENO, "DD_LOADBUFFER_PATCH_SKIPPED reason=main_image\n");
@@ -128,7 +129,8 @@ __attribute__((constructor)) static void initialize(void) {
     dprintf(STDERR_FILENO, "DD_LOADBUFFER_PATCH_SKIPPED code=%d\n", result);
   } else if (resources_found)
     dprintf(STDERR_FILENO,
-            "DD_LOADBUFFER_PATCH_APPLIED cap=%u buffers=6 sites=7\n", NEW_CAP);
+            "DD_LOADBUFFER_PATCH_APPLIED cap=%u buffers=6 sites=7\n",
+            dd_resource_buffer_bytes());
   if (render_found) {
     result = apply_render_patch(&image);
     if (result) {

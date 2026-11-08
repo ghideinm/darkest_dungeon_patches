@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from .address_scan import check_instructions, read_image, resolve, signatures
-from .paths import COMMON_NATIVE, PATCH_ROOT, WINDOWS_NATIVE, WINDOWS_SCRIPTS
+from .paths import COMMON_NATIVE, CONFIG_SCRIPTS, PATCH_ROOT, WINDOWS_NATIVE, WINDOWS_SCRIPTS
 from .windows_proxy import acquire
 
 HERE = WINDOWS_NATIVE
@@ -84,6 +84,8 @@ def compile_binaries(output: Path, compiler: str | None = None, proxy: Path | No
     proxy = acquire(output / "winmm.dll", proxy)
     configuration = output / "winmm.ini"
     shutil.copyfile(WINDOWS_SCRIPTS / "winmm.ini", configuration)
+    patch_configuration = output / "dd_engine_patch.ini"
+    shutil.copyfile(CONFIG_SCRIPTS / patch_configuration.name, patch_configuration)
     library = output / "dd_engine_patch.asi"
     subprocess.run(
         [*common, "-shared", str(COMMON_NATIVE / "skin_rig_patch.c"), "-lm", "-o", str(library)],
@@ -97,6 +99,7 @@ def compile_binaries(output: Path, compiler: str | None = None, proxy: Path | No
             ("setup_script", (WINDOWS_SCRIPTS / "windows_install.ps1").read_bytes()),
             ("setup_proxy", proxy.read_bytes()),
             ("setup_config", configuration.read_bytes()),
+            ("setup_patch_config", patch_configuration.read_bytes()),
             ("setup_library", library.read_bytes()),
             ("setup_license", (PATCH_ROOT / "licenses/ultimate_asi_loader.txt").read_bytes()),
         ):
@@ -146,6 +149,7 @@ def compile_binaries(output: Path, compiler: str | None = None, proxy: Path | No
     return {
         "proxy": str(proxy),
         "configuration": str(configuration),
+        "patch_configuration": str(patch_configuration),
         "library": str(library),
         "setup": str(setup),
     }

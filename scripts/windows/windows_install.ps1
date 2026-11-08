@@ -208,7 +208,7 @@ function Invoke-Setup {
         if(Test-Path -LiteralPath $exe){Assert-RegularPath $dir;Assert-RegularPath $exe;Assert-GameExecutable $exe;$dir}
     })
     if(-not $targets.Count){throw 'No _windows/win64 or _windowsnosteam/win64 game found.'}
-    $names=@('dd_engine_patch.asi','winmm.ini','winmm.dll')
+    $names=@('dd_engine_patch.asi','winmm.ini','dd_engine_patch.ini','winmm.dll')
     $proxyHash=(Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'winmm.dll')).Hash
     $legacy=@(Get-LegacyInstalls $root)
     $details=@(foreach($dir in $targets){
@@ -218,10 +218,12 @@ function Invoke-Setup {
         if((Test-Path -LiteralPath $plugin) -and -not $ours){throw ('Unrecognized plugin, refusing to overwrite: '+$plugin)}
         $configuration=Join-Path $dir 'winmm.ini'
         Assert-RegularPath $configuration
+        $patchConfiguration=Join-Path $dir 'dd_engine_patch.ini'
+        Assert-RegularPath $patchConfiguration
         if((Test-Path -LiteralPath $configuration) -and -not $ours){throw ('Existing WinMM configuration belongs to another installation: '+$configuration)}
         $hasProxy=Test-Path -LiteralPath $proxy
         if($hasProxy -and (-not $ours -or (Get-FileHash -LiteralPath $proxy).Hash -cne $proxyHash)){throw ('Existing WinMM proxy belongs to another installation: '+$proxy)}
-        [ordered]@{directory=$dir;installed=($ours -and $hasProxy -and (Test-Path -LiteralPath $configuration))}
+        [ordered]@{directory=$dir;installed=($ours -and $hasProxy -and (Test-Path -LiteralPath $configuration) -and (Test-Path -LiteralPath $patchConfiguration))}
     })
     if($Action -in @('Status','Preview')){return [ordered]@{targets=$details;legacy_installations=$legacy.Count;files=$names}}
     Assert-GameStopped
@@ -234,8 +236,10 @@ function Invoke-Setup {
     }
     try {
         foreach($dir in $targets){
-            foreach($name in $(if($Action -eq 'Uninstall'){@('winmm.dll','dd_engine_patch.asi','winmm.ini')}else{$names})){
-                $path=Join-Path $dir $name;Save-Before $path
+            foreach($name in $(if($Action -eq 'Uninstall'){@('winmm.dll','dd_engine_patch.asi','winmm.ini','dd_engine_patch.ini')}else{$names})){
+                $path=Join-Path $dir $name
+                if($Action -eq 'Install' -and $name -eq 'dd_engine_patch.ini' -and (Test-Path -LiteralPath $path)){continue}
+                Save-Before $path
                 if($Action -eq 'Uninstall'){if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path}}
                 else {
                     $source=Join-Path $PSScriptRoot $name

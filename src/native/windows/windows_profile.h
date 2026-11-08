@@ -6,7 +6,6 @@
 /* Patch operations use symbols resolved by unique instruction features. */
 #define DD_WINDOWS_RESOURCE_BUFFERS 12
 #define DD_WINDOWS_OLD_CAP 0x1000000U
-#define DD_WINDOWS_NEW_CAP 0x2000000U
 typedef struct {
   DdSymbol symbol;
   size_t length;

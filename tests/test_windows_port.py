@@ -13,7 +13,12 @@ from unittest.mock import patch
 from address_fixtures import make_fixture, write_pe
 
 from darkest_dungeon_patches import windows_port, windows_proxy
-from darkest_dungeon_patches.paths import COMMON_NATIVE, WINDOWS_NATIVE, WINDOWS_SCRIPTS
+from darkest_dungeon_patches.paths import (
+    COMMON_NATIVE,
+    CONFIG_SCRIPTS,
+    WINDOWS_NATIVE,
+    WINDOWS_SCRIPTS,
+)
 
 IDENTITY = b"DarkestDungeonPatches.Win64.ProxyPlugin.v1"
 
@@ -73,6 +78,9 @@ class WindowsSetupTest(unittest.TestCase):
         setup.write_bytes((WINDOWS_SCRIPTS / setup.name).read_bytes())
         (package / "winmm.dll").write_bytes(b"own proxy fixture")
         (package / "winmm.ini").write_bytes((WINDOWS_SCRIPTS / "winmm.ini").read_bytes())
+        (package / "dd_engine_patch.ini").write_bytes(
+            (CONFIG_SCRIPTS / "dd_engine_patch.ini").read_bytes()
+        )
         (package / "dd_engine_patch.asi").write_bytes(b"own PE plugin " + IDENTITY)
         header = bytearray(512)
         header[:2] = b"MZ"
@@ -120,10 +128,13 @@ $script:busy=$true;$blocked=$false
 try{Invoke-Setup|Out-Null}catch{$blocked=-not(Test-Path (Join-Path $x.game '_windows/win64/winmm.dll'))}
 $script:busy=$false
 $first=Invoke-Setup
+$custom=Join-Path $first.targets[0] 'dd_engine_patch.ini'
+[IO.File]::WriteAllText($custom,"[memory]`nresource_buffer_mib=64`n")
 $again=Invoke-Setup
+$preserved=[IO.File]::ReadAllText($custom) -ceq "[memory]`nresource_buffer_mib=64`n"
 $targets=@($first.targets)
 $minimal=$true
-foreach($dir in $targets){$minimal=$minimal -and (@(Get-ChildItem $dir -File).Count -eq 4)}
+foreach($dir in $targets){$minimal=$minimal -and (@(Get-ChildItem $dir -File).Count -eq 5)}
 $old=[IO.File]::ReadAllBytes((Join-Path $targets[0] 'dd_engine_patch.asi'))
 $source=Join-Path $x.package 'dd_engine_patch.asi'
 [IO.File]::AppendAllText($source,' update')
@@ -149,7 +160,7 @@ Remove-Item -LiteralPath $foreign
 $foreign=Join-Path $targets[1] 'winmm.ini';[IO.File]::WriteAllText($foreign,'another mod configuration')
 $configurationConflict=$false
 try{Invoke-Setup|Out-Null}catch{$configurationConflict=([IO.File]::ReadAllText($foreign) -ceq 'another mod configuration') -and -not(Test-Path (Join-Path $targets[0] 'dd_engine_patch.asi'))}
-[ordered]@{blocked=$blocked;count=$targets.Count;minimal=$minimal;failed=$failed;rollback=$rollback;clean=$clean;conflict=$conflict;configuration_conflict=$configurationConflict;partial=$partial;no_state=(-not(Test-Path (Join-Path $x.local 'DarkestDungeonPatches')))}|ConvertTo-Json
+[ordered]@{blocked=$blocked;count=$targets.Count;minimal=$minimal;preserved=$preserved;failed=$failed;rollback=$rollback;clean=$clean;conflict=$conflict;configuration_conflict=$configurationConflict;partial=$partial;no_state=(-not(Test-Path (Join-Path $x.local 'DarkestDungeonPatches')))}|ConvertTo-Json
 """
             )
             result = self.run_powershell(script, root)
@@ -157,6 +168,7 @@ try{Invoke-Setup|Out-Null}catch{$configurationConflict=([IO.File]::ReadAllText($
             for key in (
                 "blocked",
                 "minimal",
+                "preserved",
                 "failed",
                 "rollback",
                 "clean",
@@ -399,9 +411,10 @@ int wmain(void) {
  const unsigned char *image=(const void*)GetModuleHandleW(NULL);
  int original=GetEnvironmentVariableW(L"DD_EXPECT_ORIGINAL",NULL,0)!=0;
  if(!ready || *ready!=(original?0:1))return 11;
- uint32_t cap;memcpy(&cap,image+DD_RESOURCE_RVA,4);
- uint32_t expected=original?DD_EXPECT_CAP:0x2000000;
- if(cap!=expected)return 12;
+ uint32_t expected=original?DD_EXPECT_CAP:
+   GetEnvironmentVariableW(L"DD_EXPECT_CONFIGURED",NULL,0)?0x4000000:0x2000000;
+ const unsigned sites[]={DD_RESOURCE_RVA,DD_RESOURCE_RVA_1,DD_RESOURCE_RVA_2};
+ for(unsigned i=0;i<3;++i){uint32_t cap;memcpy(&cap,image+sites[i],4);if(cap!=expected)return 12;}
  if(image[DD_COLOUR_RVA]!=(original?0x48:0xe9))return 13;
  if(image[DD_RENDER_RVA]!=(original?0xbf:0x90))return 14;
  if(image[DD_PALETTE_RVA]!=(original?0x48:0xe9))return 18;
@@ -417,6 +430,8 @@ int wmain(void) {
 """)
             definitions = [
                 f"-DDD_RESOURCE_RVA={fixture.symbols['RESOURCE_0'] + 1}",
+                f"-DDD_RESOURCE_RVA_1={fixture.symbols['RESOURCE_1'] + 7}",
+                f"-DDD_RESOURCE_RVA_2={fixture.symbols['RESOURCE_2'] + 4}",
                 f"-DDD_COLOUR_RVA={fixture.symbols['HOOK_COLOUR']}",
                 f"-DDD_RENDER_RVA={fixture.symbols['RENDER_0']}",
                 f"-DDD_PALETTE_RVA={fixture.symbols['FULL_PATH']}",
@@ -477,8 +492,17 @@ int wmain(void) {
             environment = dict(
                 os.environ, WINEDEBUG="-all", WINEDLLOVERRIDES="winmm=n,b;winemenubuilder.exe=d"
             )
-            for case in ("matching", "signature", "guard", "rollback"):
+            for case in ("matching", "configured", "signature", "guard", "rollback"):
                 with self.subTest(case=case):
+                    configuration = root / "dd_engine_patch.ini"
+                    log = root / "dd_engine_patch.log"
+                    configuration.unlink(missing_ok=True)
+                    log.unlink(missing_ok=True)
+                    if case == "configured":
+                        configuration.write_text(
+                            "[memory]\nresource_buffer_mib=64\ncache_initial_capacity=3\n"
+                            "[logging]\nlog_to_file=1\n"
+                        )
                     candidate = bytearray(data)
                     if case == "signature":
                         candidate[
@@ -522,7 +546,9 @@ static BOOL fault_protect(void *address,SIZE_T length,DWORD protect,DWORD *previ
                         [runner, str(binary)],
                         cwd=root,
                         env=(
-                            environment
+                            dict(environment, DD_EXPECT_CONFIGURED="1")
+                            if case == "configured"
+                            else environment
                             if case == "matching"
                             else dict(environment, DD_EXPECT_ORIGINAL="1")
                         ),
@@ -532,7 +558,13 @@ static BOOL fault_protect(void *address,SIZE_T length,DWORD protect,DWORD *previ
                     )
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn("OWN_PROXY_FIXTURE_OK", result.stdout)
-                    self.assertFalse(list(root.glob("*.log")))
+                    if case == "configured":
+                        self.assertIn(
+                            "buffer_mib=64 cache_initial=3 log_to_file=1", log.read_text()
+                        )
+                        self.assertIn("DD_PATCH_APPLIED", log.read_text())
+                    else:
+                        self.assertFalse(list(root.glob("*.log")))
 
 
 if __name__ == "__main__":

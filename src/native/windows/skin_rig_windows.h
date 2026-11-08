@@ -3,19 +3,6 @@
 #include "windows_patch.h"
 #include "windows_profile.h"
 
-static int windows_log(int descriptor, const char *format, ...) {
-  (void)descriptor;
-  char line[4096];
-  va_list arguments;
-  va_start(arguments, format);
-  int length = vsnprintf(line, sizeof(line), format, arguments);
-  va_end(arguments);
-  if (length < 0)
-    return length;
-  OutputDebugStringA(line);
-  return length;
-}
-
 static unsigned windows_colour_count(void *klass) {
   uintptr_t begin = (uintptr_t)pointer_at(klass, 0x5e0);
   uintptr_t end = (uintptr_t)pointer_at(klass, 0x5e8);
@@ -366,6 +353,7 @@ static int windows_rig_plan(DdWindowsPatches *plan, unsigned char **allocated) {
 __declspec(dllexport) void InitializeASI(void) {
   if (InterlockedCompareExchange(&dd_patch_status.state, 1, 0))
     return;
+  dd_runtime_init((const void *)InitializeASI);
   base = (uintptr_t)GetModuleHandleW(NULL);
   unsigned groups =
       (windows_option("DD_LOADBUFFER_PATCH") ? DD_GROUP_RESOURCE : 0) |
@@ -399,7 +387,7 @@ __declspec(dllexport) void InitializeASI(void) {
   if ((groups & DD_GROUP_RIG) && !windows_rig_plan(&plan, &stubs))
     goto rollback;
   if (groups & DD_GROUP_RESOURCE) {
-    const uint32_t cap = DD_WINDOWS_NEW_CAP;
+    const uint32_t cap = dd_resource_buffer_bytes();
     for (size_t i = 0; i < sizeof(windows_resource_sites) / sizeof(WindowsSite);
          ++i) {
       const WindowsSite *site = windows_resource_sites + i;

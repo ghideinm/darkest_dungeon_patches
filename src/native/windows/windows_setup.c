@@ -31,7 +31,8 @@ static int write_payload(const wchar_t *root, const wchar_t *name,
 }
 static void remove_payload(const wchar_t *root) {
   const wchar_t *names[] = {L"windows_install.ps1", L"winmm.dll",
-                            L"dd_engine_patch.asi", L"winmm.ini"};
+                            L"dd_engine_patch.asi", L"winmm.ini",
+                            L"dd_engine_patch.ini"};
   wchar_t path[PATH_CAP];
   for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
     if (join_path(path, root, names[i]))
@@ -88,6 +89,8 @@ static int setup(int argc, wchar_t **argv, int *quiet) {
                      (DWORD)sizeof(setup_proxy)) ||
       !write_payload(temporary, L"winmm.ini", setup_config,
                      (DWORD)sizeof(setup_config)) ||
+      !write_payload(temporary, L"dd_engine_patch.ini", setup_patch_config,
+                     (DWORD)sizeof(setup_patch_config)) ||
       !write_payload(temporary, L"dd_engine_patch.asi", setup_library,
                      (DWORD)sizeof(setup_library)) ||
       !join_path(script, temporary, L"windows_install.ps1"))

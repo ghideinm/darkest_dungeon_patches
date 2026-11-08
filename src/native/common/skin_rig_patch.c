@@ -19,11 +19,8 @@
 #include <windows.h>
 #define DD_CLASS_VTABLE_OFFSET 0x30
 #define DD_FUNCTION_WORDS 8
-static int windows_log(int descriptor, const char *format, ...);
-#define dprintf windows_log
 #else
 #include "../linux/linux_patch.h"
-#include "../linux/linux_runtime.h"
 #include <dlfcn.h>
 #include <link.h>
 #include <sys/mman.h>
@@ -33,6 +30,8 @@ static int windows_log(int descriptor, const char *format, ...);
 
 #include "address_profile.h"
 #include "palette_sources.h"
+#include "patch_config.h"
+#define dprintf dd_patch_log
 
 /* Original instructions are checked before native hooks run. */
 typedef struct {
@@ -60,13 +59,14 @@ static Route **routes;
 static size_t route_count, route_capacity;
 
 static void *grow_array(void *data, size_t *capacity, size_t count,
-                        size_t stride) {
+                        size_t stride, size_t initial) {
   if (count <= *capacity)
     return data;
-  size_t maximum = SIZE_MAX / stride;
+  size_t maximum = PTRDIFF_MAX / stride;
   if (count > maximum)
     return NULL;
-  size_t next = *capacity ? *capacity : (maximum < 16 ? maximum : 16);
+  size_t next =
+      *capacity ? *capacity : (initial && initial < maximum ? initial : count);
   while (next < count)
     next = next > maximum / 2 ? count : next * 2;
   void *grown = realloc(data, next * stride);
@@ -89,8 +89,8 @@ static void clear_routes(void) {
 static Route *append_route(const Route *value) {
   if (route_count == SIZE_MAX)
     return NULL;
-  Route **grown =
-      grow_array(routes, &route_capacity, route_count + 1, sizeof(*routes));
+  Route **grown = grow_array(routes, &route_capacity, route_count + 1,
+                             sizeof(*routes), dd_config.cache_initial_capacity);
   if (!grown)
     return NULL;
   routes = grown;
@@ -117,7 +117,7 @@ static int append_file_name(NativeFileMatch *files, const char *name) {
     return 0;
   capacity = files->begin ? (size_t)(files->capacity - files->begin) : 0;
   void *grown =
-      grow_array(files->begin, &capacity, count + 1, sizeof(*files->begin));
+      grow_array(files->begin, &capacity, count + 1, sizeof(*files->begin), 16);
   if (!grown)
     return 0;
   files->begin = grown;
@@ -147,7 +147,7 @@ static int rig_files(const char *directory, NativeFileMatch *files) {
         snprintf(key, sizeof(key), ">%s/%s", directory, entry->d_name) >=
             (int)sizeof(key) ||
         stat(key + 1, &info) || !S_ISREG(info.st_mode) || info.st_size == 0 ||
-        info.st_size > 0x2000000 ||
+        (uint64_t)info.st_size > dd_rig_file_limit() ||
         snprintf(atlas, sizeof(atlas), "%s/%.*s.atlas", directory, (int)n - 5,
                  entry->d_name) >= (int)sizeof(atlas) ||
         stat(atlas, &info) || !S_ISREG(info.st_mode) || info.st_size == 0 ||
@@ -220,7 +220,7 @@ static int add_rig_key(RigPlan *plan, const char *key) {
   if (plan->count == SIZE_MAX)
     return 0;
   RigEntry *grown = grow_array(plan->entries, &plan->capacity, plan->count + 1,
-                               sizeof(*plan->entries));
+                               sizeof(*plan->entries), 16);
   if (!grown)
     return 0;
   plan->entries = grown;
@@ -644,8 +644,9 @@ static const SkinCatalog *source_catalog(void *klass) {
     free(catalog.entries);
     return NULL;
   }
-  SkinCatalog **grown = grow_array(catalogs, &catalog_capacity,
-                                   catalog_count + 1, sizeof(*catalogs));
+  SkinCatalog **grown =
+      grow_array(catalogs, &catalog_capacity, catalog_count + 1,
+                 sizeof(*catalogs), dd_config.cache_initial_capacity);
   if (!grown) {
     free(catalog.entries);
     return NULL;
@@ -1348,7 +1349,7 @@ __attribute__((constructor)) static void init(void) {
   const char *name = strrchr(executable, '/');
   if (!name || strcmp(name + 1, "darkest.bin.x86_64"))
     return;
-  dd_linux_log();
+  dd_runtime_init((const void *)init);
   DdLinuxImage image = {0};
   if (!dd_linux_image(&image)) {
     dprintf(2, "DD_RIG_PATCH_SKIPPED reason=main_image\n");
