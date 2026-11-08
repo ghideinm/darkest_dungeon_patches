@@ -19,7 +19,7 @@ static int windows_log(int descriptor, const char *format, ...) {
 static unsigned windows_colour_count(void *klass) {
   uintptr_t begin = (uintptr_t)pointer_at(klass, 0x5e0);
   uintptr_t end = (uintptr_t)pointer_at(klass, 0x5e8);
-  if (end < begin || (end - begin) % 512 || (end - begin) / 512 > 512)
+  if (end < begin || (end - begin) % 512 || (end - begin) / 512 > UINT_MAX)
     return 0;
   return (unsigned)((end - begin) / 512);
 }
@@ -31,8 +31,8 @@ static const char *windows_colour_path(void *klass, unsigned index) {
 static unsigned windows_alternate_count(void *device) {
   uintptr_t begin = (uintptr_t)pointer_at(device, 8);
   uintptr_t end = (uintptr_t)pointer_at(device, 16);
-  if (end < begin || (end - begin) % 0x210 || (end - begin) / 0x210 > 4096)
-    return 4097;
+  if (end < begin || (end - begin) % 0x210 || (end - begin) / 0x210 >= UINT_MAX)
+    return UINT_MAX;
   return (unsigned)((end - begin) / 0x210);
 }
 static const void *windows_alternate_root(void *device, unsigned index) {
@@ -65,6 +65,8 @@ static void windows_match_files(NativeFileMatch *files, int mount,
   windows_match_device(files, device, directory, pattern, details, order,
                        flags);
   unsigned count = windows_alternate_count(device);
+  if (count == UINT_MAX)
+    return;
   void (*find_root)(void *, NativeFileMatch *, void *, unsigned, const char *,
                     const char *, int, int, int) =
       (void *)(native_address(DD_FULL_PATH));
@@ -151,12 +153,8 @@ static void start_animation(void *sprite, const char *name, float time) {
 }
 static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
   const Route *route = find_route(actor, int_at(actor, 0xb68));
-  if (!route && runtime_actor(actor))
-    _exit(125);
-  void *sprite = route ? make_sprite(actor_class(actor), route)
-                       : native_new(original, flag);
-  if (!sprite && runtime_actor(actor))
-    _exit(125);
+  void *sprite =
+      create_actor_sprite(original, flag, actor_class(actor), &route);
   dprintf(2, "DD_RIG_ACTOR_INIT actor=%p sprite=%p skin=%s\n", actor, sprite,
           route ? route->skin : "native");
   return sprite;

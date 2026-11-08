@@ -174,6 +174,89 @@ int main(void) {
             subprocess.run([str(binary)], check=True)
 
 
+class DynamicStorageTest(unittest.TestCase):
+    def test_large_maps_file_lists_and_allocation_cleanup_under_sanitizers(self):
+        with tempfile.TemporaryDirectory(prefix="dd-storage-test-") as directory:
+            root = Path(directory)
+            source = root / "storage.c"
+            source.write_text(
+                '#define DD_RIG_RUNTIME_TEST\n#include "'
+                + (COMMON_NATIVE / "skin_rig_patch.c").as_posix()
+                + '"\n#include <assert.h>\n'
+                + r"""
+static const char *resource_key(void *manager,const Handle *handle) {
+  (void)manager;(void)handle;return "prefix.idle.skel";
+}
+int main(void) {
+  FILE *map = tmpfile();
+  assert(map);
+  for (unsigned i=0;i<320;++i)
+    fprintf(map,"heroes/alpha/alpha_%u group prefix.\n",i);
+  rewind(map);
+  assert(read_routes(map) && route_count == 320);
+  fclose(map);
+  const Route *saved = routes[0];
+  Route extra = {0};
+  for (unsigned i=0;i<320;++i) assert(append_route(&extra));
+  assert(saved == routes[0] && !strcmp(saved->skin,"heroes/alpha/alpha_0"));
+  void *manager=(void*)1;base=(uintptr_t)&manager;
+  native_symbols.values[DD_RESOURCE]=0;resource_name=resource_key;
+  Handle *handles=calloc(700,sizeof(*handles));assert(handles);
+  Handles all={handles,handles+700,handles+700},selected={0};
+  unsigned char klass[0xe0+sizeof(Handles)]={0};
+  memcpy(klass+0xe0,&all,sizeof(all));
+  assert(select_handles(klass,saved,&selected)==700);
+  free(selected.begin);free(handles);
+  clear_routes();
+  clear_routes();
+  NativeFileMatch files = {0};
+  char name[256];
+  for (unsigned i=0;i<4200;++i) {
+    snprintf(name,sizeof(name),"image_%u.png",i);
+    assert(append_file_name(&files,name));
+  }
+  size_t count;
+  assert(file_match_count(&files,&count) && count == 4200);
+  assert(!strcmp(files.begin[4199],"image_4199.png"));
+  NativeFileMatch invalid = files;
+  invalid.end = (void *)((char *)files.end-1);
+  assert(!file_match_count(&invalid,&count));
+  invalid = files; invalid.capacity = files.begin;
+  assert(!file_match_count(&invalid,&count));
+  free(files.begin);
+  size_t capacity = 0;
+  assert(!grow_array(NULL,&capacity,SIZE_MAX,sizeof(RigEntry)) && !capacity);
+  RigPlan plan = {0};
+  for (unsigned i=0;i<300;++i) {
+    snprintf(name,sizeof(name),">heroes/alpha/action_%03u.skel",i);
+    assert(add_rig_key(&plan,name));
+  }
+  assert(plan.count == 300);
+  free(plan.entries);
+  return 0;
+}
+"""
+            )
+            binary = root / "storage"
+            subprocess.run(
+                [
+                    "clang",
+                    "-std=c11",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-fsanitize=address,undefined",
+                    str(source),
+                    "-ldl",
+                    "-lm",
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+            )
+            subprocess.run([str(binary)], check=True)
+
+
 class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
     """Exercise the production discovery/loading path with controlled native APIs."""
 
@@ -181,6 +264,34 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
     def setUpClass(cls):
         super().setUpClass()
         library = Path(cls.temporary.name) / "runtime_fixture.so"
+        source = Path(cls.temporary.name) / "runtime_fixture.c"
+        source.write_text(
+            """#define _GNU_SOURCE
+#include <stdlib.h>
+static int allocation_budget = -1;
+static int refuse_allocation(void) {
+  if (allocation_budget < 0) return 0;
+  if (!allocation_budget) return 1;
+  --allocation_budget;
+  return 0;
+}
+static void *fixture_malloc(size_t size) {
+  return refuse_allocation() ? NULL : malloc(size);
+}
+static void *fixture_calloc(size_t count, size_t size) {
+  return refuse_allocation() ? NULL : calloc(count, size);
+}
+static void *fixture_realloc(void *data, size_t size) {
+  return refuse_allocation() ? NULL : realloc(data, size);
+}
+#define malloc fixture_malloc
+#define calloc fixture_calloc
+#define realloc fixture_realloc
+"""
+            + '#include "'
+            + (COMMON_NATIVE / "skin_rig_patch.c").as_posix()
+            + '"\nvoid dd_runtime_test_allocation_budget(int count) {allocation_budget=count;}\n'
+        )
         subprocess.run(
             [
                 "clang",
@@ -192,7 +303,7 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
                 "-DDD_RIG_RUNTIME_TEST",
                 "-fPIC",
                 "-shared",
-                str((COMMON_NATIVE / "skin_rig_patch.c")),
+                str(source),
                 "-ldl",
                 "-lm",
                 "-o",
@@ -218,6 +329,17 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         cls.library.dd_runtime_test_bind_sources.argtypes = [ctypes.c_void_p] * 6 + [ctypes.c_int]
         cls.library.dd_runtime_test_source.argtypes = [ctypes.c_void_p, ctypes.c_uint]
         cls.library.dd_runtime_test_source.restype = ctypes.c_char_p
+        cls.library.dd_runtime_test_actor_sprite.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        cls.library.dd_runtime_test_actor_sprite.restype = ctypes.c_void_p
+        cls.library.dd_runtime_test_route.argtypes = [ctypes.c_char_p]
+        cls.library.dd_runtime_test_route.restype = ctypes.c_void_p
+        cls.library.dd_runtime_test_saved_route.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        cls.library.dd_runtime_test_saved_route.restype = ctypes.c_int
+        cls.library.dd_runtime_test_allocation_budget.argtypes = [ctypes.c_int]
 
     def setUp(self):
         super().setUp()
@@ -234,6 +356,8 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
 
         self.callbacks, self.keys, self.loaded, self.released = [], [], [], []
         self.created, self.matches, self.destroyed = [], [], []
+        self.constructor_calls = []
+        self.create_failures = 0
         self.sources = {"idle.png": "mods/chosen/", "walk.png": "mods/chosen/"}
         self.alias = False
         self.loaded_ok = True
@@ -288,6 +412,10 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         def create(vector, flag):
             count = (vector.contents.end - vector.contents.begin) // ctypes.sizeof(Handle)
             self.created.append(count)
+            self.constructor_calls.append((vector.contents.begin, count, flag))
+            if self.create_failures:
+                self.create_failures -= 1
+                return None
             return 0x1234
 
         match_callback = callback(
@@ -335,7 +463,7 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
             create_callback,
             name_callback,
         )
-        self.Vector, self.callback = Vector, callback
+        self.Vector, self.Handle, self.callback = Vector, Handle, callback
 
     def bind_catalog(self, roots=None, preserve_sources=False):
         ptr = ctypes.c_void_p
@@ -584,6 +712,105 @@ class RuntimeLoadingTest(RuntimeRigFixture, unittest.TestCase):
         self.assertIsNone(self.library.dd_runtime_test_sprite(self.skin.encode()))
         self.assertEqual(self.released, [0, 1])
         self.assertEqual(self.created, [])
+
+    def original_handles(self):
+        handles = (self.Handle * 1)()
+        handles[0].index, handles[0].generation = 42, 9
+        address = ctypes.addressof(handles)
+        return handles, self.Vector(
+            address, address + ctypes.sizeof(handles), address + ctypes.sizeof(handles)
+        )
+
+    def test_route_growth_preserves_live_addresses_and_existing_sources(self):
+        self.rig("mods/chosen/heroes/alpha/anim")
+        saved = self.library.dd_runtime_test_route(self.skin.encode())
+        self.assertTrue(saved)
+        for i in range(300):
+            skin = f"heroes/alpha/alpha_{i:03d}".encode()
+            self.assertEqual(self.library.dd_runtime_test_sprite(skin), 0x1234)
+        self.assertEqual(self.library.dd_runtime_test_route(self.skin.encode()), saved)
+        self.assertEqual(self.library.dd_runtime_test_saved_route(saved, self.skin.encode()), 1)
+
+    def test_catalog_growth_and_more_than_512_palettes(self):
+        self.bind_catalog(roots=[], preserve_sources=True)
+        for klass in range(160):
+            self.assertEqual(self.library.dd_runtime_test_source(0x1000 + klass, 3), b"")
+        self.assertEqual(self.library.dd_runtime_test_source(0x1000, 0), b"")
+        roots = [(f"mods/provider_{i}/", [f"alpha_{c}" for c in "ABCD"]) for i in range(140)]
+        self.bind_catalog(roots=roots, preserve_sources=True)
+        self.assertEqual(self.library.dd_runtime_test_source(0x55, 563), b"mods/provider_0/")
+
+    def test_more_than_256_skeletons_load_and_release_every_handle(self):
+        for i in range(270):
+            self.rig("mods/chosen/heroes/alpha/anim", action=f"action_{i:03d}")
+        self.assertEqual(self.library.dd_runtime_test_sprite(self.skin.encode()), 0x1234)
+        self.assertEqual(self.created, [270])
+        self.assertEqual(len(self.loaded), 270)
+        self.assertEqual(self.released, list(range(270)))
+
+    def test_route_refusal_and_load_failure_use_original_constructor_arguments(self):
+        handles, original = self.original_handles()
+        self.assertEqual(
+            self.library.dd_runtime_test_actor_sprite(
+                self.skin.encode(), ctypes.byref(original), 7
+            ),
+            0x1234,
+        )
+        self.assertEqual(self.constructor_calls[-1], (ctypes.addressof(handles), 1, 7))
+        self.rig("mods/chosen/heroes/alpha/anim")
+        self.loaded_ok = False
+        self.assertEqual(
+            self.library.dd_runtime_test_actor_sprite(
+                self.skin.encode(), ctypes.byref(original), 7
+            ),
+            0x1234,
+        )
+        self.assertEqual(self.constructor_calls[-1], (ctypes.addressof(handles), 1, 7))
+        self.assertEqual(self.released, [0])
+        self.loaded_ok = True
+        self.create_failures = 1
+        self.assertEqual(
+            self.library.dd_runtime_test_actor_sprite(
+                self.skin.encode(), ctypes.byref(original), 7
+            ),
+            0x1234,
+        )
+        self.assertEqual(self.constructor_calls[-1], (ctypes.addressof(handles), 1, 7))
+        self.assertEqual(self.constructor_calls[-2][2], 0)
+
+    def test_allocation_failures_fall_back_and_allow_later_retry(self):
+        self.rig("mods/chosen/heroes/alpha/anim")
+        handles, original = self.original_handles()
+        saved = self.library.dd_runtime_test_route(self.skin.encode())
+        for budget in range(18):
+            skin = f"heroes/alpha/alpha_failure_{budget}".encode()
+            self.library.dd_runtime_test_allocation_budget(budget)
+            try:
+                self.assertEqual(
+                    self.library.dd_runtime_test_actor_sprite(skin, ctypes.byref(original), 7),
+                    0x1234,
+                )
+            finally:
+                self.library.dd_runtime_test_allocation_budget(-1)
+            begin, count, flag = self.constructor_calls[-1]
+            if flag == 7:
+                self.assertEqual((begin, count), (ctypes.addressof(handles), 1))
+            self.assertEqual(self.library.dd_runtime_test_saved_route(saved, self.skin.encode()), 1)
+            self.assertEqual(self.library.dd_runtime_test_sprite(skin), 0x1234)
+
+    def test_catalog_allocation_failure_leaves_existing_entries_usable(self):
+        self.bind_catalog(roots=[], preserve_sources=True)
+        for klass in range(16):
+            self.assertEqual(self.library.dd_runtime_test_source(0x1000 + klass, 0), b"")
+        # Entries, pointer-table growth and the stable catalog node each allocate.
+        for budget in range(3):
+            self.library.dd_runtime_test_allocation_budget(budget)
+            try:
+                self.assertIsNone(self.library.dd_runtime_test_source(0x2000, 0))
+            finally:
+                self.library.dd_runtime_test_allocation_budget(-1)
+            self.assertEqual(self.library.dd_runtime_test_source(0x1000, 0), b"")
+        self.assertEqual(self.library.dd_runtime_test_source(0x2000, 0), b"")
 
 
 if __name__ == "__main__":

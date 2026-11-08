@@ -1,12 +1,27 @@
 #ifndef DD_PALETTE_SOURCES_H
 #define DD_PALETTE_SOURCES_H
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 typedef struct {
   char (*begin)[256], (*end)[256], (*capacity)[256];
 } NativeFileMatch;
+
+static inline int file_match_count(const NativeFileMatch *files,
+                                   size_t *count) {
+  uintptr_t begin = (uintptr_t)files->begin, end = (uintptr_t)files->end,
+            capacity = (uintptr_t)files->capacity;
+  *count = 0;
+  if (!begin)
+    return !end && !capacity;
+  if (end < begin || capacity < end || (end - begin) % sizeof(*files->begin) ||
+      (capacity - begin) % sizeof(*files->begin))
+    return 0;
+  *count = (end - begin) / sizeof(*files->begin);
+  return 1;
+}
 
 #if defined(_WIN32) || defined(DD_PALETTE_SOURCES_TEST)
 typedef void (*PaletteRootMatch)(void *, NativeFileMatch *, void *, unsigned,
@@ -44,12 +59,12 @@ static void match_palette_root(PaletteRootMatch find,
   NativeFileMatch source = {0};
   find(storage, &source, device, root, directory, pattern, details, order,
        flags);
-  ptrdiff_t count = source.begin ? source.end - source.begin : 0;
-  int valid = count >= 0 && count <= 4096;
-  for (ptrdiff_t i = 0; valid && i < count; ++i)
+  size_t count;
+  int valid = file_match_count(&source, &count);
+  for (size_t i = 0; valid && i < count; ++i)
     valid = memchr(source.begin[i], 0, sizeof(source.begin[i])) != NULL;
   if (valid)
-    for (ptrdiff_t i = 0; i < count; ++i)
+    for (size_t i = 0; i < count; ++i)
       append(files, source.begin[i]);
   destroy(&source);
   if (!valid)

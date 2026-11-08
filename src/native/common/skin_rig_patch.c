@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -42,9 +43,11 @@ typedef struct {
   Handle *begin, *end, *capacity;
 } Handles;
 typedef struct {
-  char keys[256][256];
-  char palettes[256][512];
-  size_t count;
+  char key[256], palette[512];
+} RigEntry;
+typedef struct {
+  RigEntry *entries;
+  size_t count, capacity;
 } RigPlan;
 typedef struct {
   char skin[256], hero[256], group[64], prefix[160];
@@ -52,8 +55,52 @@ typedef struct {
   RigPlan *plan;
   int tested;
 } Route;
-static Route routes[128];
-static size_t route_count;
+/* Only pointer tables move on growth: active routes retain stable addresses. */
+static Route **routes;
+static size_t route_count, route_capacity;
+
+static void *grow_array(void *data, size_t *capacity, size_t count,
+                        size_t stride) {
+  if (count <= *capacity)
+    return data;
+  size_t maximum = SIZE_MAX / stride;
+  if (count > maximum)
+    return NULL;
+  size_t next = *capacity ? *capacity : (maximum < 16 ? maximum : 16);
+  while (next < count)
+    next = next > maximum / 2 ? count : next * 2;
+  void *grown = realloc(data, next * stride);
+  if (grown)
+    *capacity = next;
+  return grown;
+}
+static void clear_routes(void) {
+  for (size_t i = 0; i < route_count; ++i) {
+    if (routes[i]->plan) {
+      free(routes[i]->plan->entries);
+      free(routes[i]->plan);
+    }
+    free(routes[i]);
+  }
+  free(routes);
+  routes = NULL;
+  route_count = route_capacity = 0;
+}
+static Route *append_route(const Route *value) {
+  if (route_count == SIZE_MAX)
+    return NULL;
+  Route **grown =
+      grow_array(routes, &route_capacity, route_count + 1, sizeof(*routes));
+  if (!grown)
+    return NULL;
+  routes = grown;
+  Route *route = malloc(sizeof(*route));
+  if (!route)
+    return NULL;
+  *route = *value;
+  routes[route_count++] = route;
+  return route;
+}
 
 static int path_join(char *out, size_t capacity, const char *a, const char *b) {
   size_t first = strlen(a), second = strlen(b);
@@ -63,9 +110,24 @@ static int path_join(char *out, size_t capacity, const char *a, const char *b) {
   memmove(out + first, b, second + 1);
   return 1;
 }
-static int rig_files(const char *directory, char names[256][256],
-                     size_t *count) {
-  *count = 0;
+static int append_file_name(NativeFileMatch *files, const char *name) {
+  size_t count, capacity;
+  if (!file_match_count(files, &count) ||
+      strlen(name) >= sizeof(*files->begin) || count == SIZE_MAX)
+    return 0;
+  capacity = files->begin ? (size_t)(files->capacity - files->begin) : 0;
+  void *grown =
+      grow_array(files->begin, &capacity, count + 1, sizeof(*files->begin));
+  if (!grown)
+    return 0;
+  files->begin = grown;
+  files->end = files->begin + count + 1;
+  files->capacity = files->begin + capacity;
+  snprintf(files->begin[count], sizeof(*files->begin), "%s", name);
+  return 1;
+}
+static int compare_names(const void *a, const void *b) { return strcmp(a, b); }
+static int rig_files(const char *directory, NativeFileMatch *files) {
   DIR *dir = opendir(directory);
   if (!dir)
     return errno == ENOENT ? 0 : -1;
@@ -81,30 +143,26 @@ static int rig_files(const char *directory, char names[256][256],
       continue;
     char key[256], atlas[512];
     struct stat info;
-    if (*count == 256 || n >= 256 ||
+    if (n >= 256 ||
         snprintf(key, sizeof(key), ">%s/%s", directory, entry->d_name) >=
             (int)sizeof(key) ||
         stat(key + 1, &info) || !S_ISREG(info.st_mode) || info.st_size == 0 ||
         info.st_size > 0x2000000 ||
         snprintf(atlas, sizeof(atlas), "%s/%.*s.atlas", directory, (int)n - 5,
                  entry->d_name) >= (int)sizeof(atlas) ||
-        stat(atlas, &info) || !S_ISREG(info.st_mode) || info.st_size == 0) {
+        stat(atlas, &info) || !S_ISREG(info.st_mode) || info.st_size == 0 ||
+        !append_file_name(files, entry->d_name)) {
       valid = 0;
       break;
     }
-    memcpy(names[(*count)++], entry->d_name, n + 1);
   }
   closedir(dir);
-  /* Native class resources are ordered; make repeated discovery deterministic.
-   */
-  for (size_t i = 1; i < *count; ++i)
-    for (size_t j = i; j && strcmp(names[j - 1], names[j]) > 0; --j) {
-      char swap[256];
-      memcpy(swap, names[j], sizeof(swap));
-      memcpy(names[j], names[j - 1], sizeof(swap));
-      memcpy(names[j - 1], swap, sizeof(swap));
-    }
-  return valid ? (*count ? 1 : 0) : -1;
+  size_t count;
+  if (!file_match_count(files, &count))
+    return -1;
+  if (count && files->begin)
+    qsort(files->begin, count, sizeof(*files->begin), compare_names);
+  return valid ? (count ? 1 : 0) : -1;
 }
 static int image_name(const char *name) {
   const char *extension = strrchr(name, '.');
@@ -147,71 +205,82 @@ static int atlas_uses_file(const char *atlas, const char *file) {
 }
 static int add_rig_key(RigPlan *plan, const char *key) {
   const char *leaf = strrchr(key, '/');
-  if (!leaf || strlen(key) >= sizeof(plan->keys[0]))
+  if (!leaf || strlen(key) >= sizeof(plan->entries[0].key))
     return 0;
   for (size_t i = 0; i < plan->count; ++i) {
-    if (!strcmp(plan->keys[i], key))
+    if (!strcmp(plan->entries[i].key, key))
       return 1;
-    const char *other = strrchr(plan->keys[i], '/');
+    const char *other = strrchr(plan->entries[i].key, '/');
     if (other && !strcmp(other, leaf)) {
-      dprintf(2, "DD_RIG_RESOURCE_CONFLICT first=%s other=%s\n", plan->keys[i],
-              key);
+      dprintf(2, "DD_RIG_RESOURCE_CONFLICT first=%s other=%s\n",
+              plan->entries[i].key, key);
       return 0;
     }
   }
-  if (plan->count == 256)
+  if (plan->count == SIZE_MAX)
     return 0;
-  memcpy(plan->keys[plan->count++], key, strlen(key) + 1);
+  RigEntry *grown = grow_array(plan->entries, &plan->capacity, plan->count + 1,
+                               sizeof(*plan->entries));
+  if (!grown)
+    return 0;
+  plan->entries = grown;
+  RigEntry *entry = plan->entries + plan->count++;
+  *entry = (RigEntry){0};
+  memcpy(entry->key, key, strlen(key) + 1);
   return 1;
 }
+static int compare_rigs(const void *a, const void *b) {
+  return strcmp(((const RigEntry *)a)->key, ((const RigEntry *)b)->key);
+}
 static void sort_plan(RigPlan *plan) {
-  for (size_t i = 1; i < plan->count; ++i)
-    for (size_t j = i; j && strcmp(plan->keys[j - 1], plan->keys[j]) > 0; --j) {
-      char swap[256];
-      memcpy(swap, plan->keys[j], sizeof(swap));
-      memcpy(plan->keys[j], plan->keys[j - 1], sizeof(swap));
-      memcpy(plan->keys[j - 1], swap, sizeof(swap));
-      char palette[512];
-      memcpy(palette, plan->palettes[j], sizeof(palette));
-      memcpy(plan->palettes[j], plan->palettes[j - 1], sizeof(palette));
-      memcpy(plan->palettes[j - 1], palette, sizeof(palette));
-    }
+  if (plan->count)
+    qsort(plan->entries, plan->count, sizeof(*plan->entries), compare_rigs);
 }
 #ifndef DD_PATCH_SELFTEST
 static int same_plan(const RigPlan *a, const RigPlan *b) {
   if (!a || !b || a->count != b->count)
     return 0;
   for (size_t i = 0; i < a->count; ++i)
-    if (strcmp(a->keys[i], b->keys[i]) ||
-        strcmp(a->palettes[i], b->palettes[i]))
+    if (strcmp(a->entries[i].key, b->entries[i].key) ||
+        strcmp(a->entries[i].palette, b->entries[i].palette))
       return 0;
   return 1;
 }
 #endif
 static int matching_rigs(const char *directory, const char *file,
                          RigPlan *plan) {
-  char names[256][256];
-  size_t count;
-  int available = rig_files(directory, names, &count);
-  if (available != 1)
-    return available;
+  NativeFileMatch files = {0};
+  int result = rig_files(directory, &files);
+  if (result != 1) {
+    free(files.begin);
+    return result;
+  }
+  size_t count = (size_t)(files.end - files.begin);
   for (size_t i = 0; i < count; ++i) {
     char atlas[512], key[256];
-    size_t length = strlen(names[i]);
+    const char *name = files.begin[i];
+    size_t length = strlen(name);
     int n = snprintf(atlas, sizeof(atlas), "%s/%.*s.atlas", directory,
-                     (int)length - 5, names[i]);
-    if (n < 0 || (size_t)n >= sizeof(atlas))
-      return -1;
+                     (int)length - 5, name);
+    if (n < 0 || (size_t)n >= sizeof(atlas)) {
+      result = -1;
+      break;
+    }
     int uses = atlas_uses_file(atlas, file);
-    if (uses < 0)
-      return -1;
+    if (uses < 0) {
+      result = -1;
+      break;
+    }
     if (!uses)
       continue;
-    n = snprintf(key, sizeof(key), ">%s/%s", directory, names[i]);
-    if (n < 0 || (size_t)n >= sizeof(key) || !add_rig_key(plan, key))
-      return -1;
+    n = snprintf(key, sizeof(key), ">%s/%s", directory, name);
+    if (n < 0 || (size_t)n >= sizeof(key) || !add_rig_key(plan, key)) {
+      result = -1;
+      break;
+    }
   }
-  return plan->count ? 1 : 0;
+  free(files.begin);
+  return result < 0 ? -1 : (plan->count ? 1 : 0);
 }
 /* Match each texture to its atlas and skeleton. Independent actions may come
  * from different providers, including official DLC. */
@@ -254,11 +323,15 @@ static int source_rigs(const char *skin, const char *file, const char *full,
 static int source_rig(const char *skin, const char *file, const char *full,
                       char out[512]) {
   RigPlan plan = {0};
-  if (source_rigs(skin, file, full, &plan) != 1)
+  if (source_rigs(skin, file, full, &plan) != 1 || !plan.count ||
+      !plan.entries) {
+    free(plan.entries);
     return 0;
+  }
   sort_plan(&plan);
-  memcpy(out, plan.keys[0] + 1, strlen(plan.keys[0]));
+  memcpy(out, plan.entries[0].key + 1, strlen(plan.entries[0].key));
   *strrchr(out, '/') = 0;
+  free(plan.entries);
   return 1;
 }
 #endif
@@ -283,10 +356,10 @@ static const Route *route_for_name(const char *name, const Route *scope) {
   const Route *best = NULL;
   size_t length = 0;
   for (size_t i = 0; i < route_count; ++i) {
-    size_t n = strlen(routes[i].prefix);
-    if (same_hero(scope, routes + i) && n > length &&
-        !strncmp(leaf, routes[i].prefix, n)) {
-      best = routes + i;
+    size_t n = strlen(routes[i]->prefix);
+    if (same_hero(scope, routes[i]) && n > length &&
+        !strncmp(leaf, routes[i]->prefix, n)) {
+      best = routes[i];
       length = n;
     }
   }
@@ -303,7 +376,7 @@ static int valid_token(const char *text) {
   return 1;
 }
 static int read_routes(FILE *file) {
-  route_count = 0;
+  clear_routes();
   char line[1024];
   while (fgets(line, sizeof(line), file)) {
     if (!strchr(line, '\n') && !feof(file))
@@ -315,8 +388,7 @@ static int read_routes(FILE *file) {
       continue;
     Route route = {0};
     char extra;
-    if (route_count == 128 ||
-        sscanf(p, "%255s %63s %159s %c", route.skin, route.group, route.prefix,
+    if (sscanf(p, "%255s %63s %159s %c", route.skin, route.group, route.prefix,
                &extra) != 3 ||
         strncmp(route.skin, "heroes/", 7) || !valid_token(route.group) ||
         !valid_token(route.prefix))
@@ -329,16 +401,17 @@ static int read_routes(FILE *file) {
     if (!valid_token(route.hero + 7))
       return 0;
     for (size_t i = 0; i < route_count; ++i) {
-      if (!strcmp(routes[i].skin, route.skin))
+      if (!strcmp(routes[i]->skin, route.skin))
         return 0;
-      if (same_hero(routes + i, &route) &&
-          ((!strcmp(routes[i].group, route.group) &&
-            strcmp(routes[i].prefix, route.prefix)) ||
-           (!strcmp(routes[i].prefix, route.prefix) &&
-            strcmp(routes[i].group, route.group))))
+      if (same_hero(routes[i], &route) &&
+          ((!strcmp(routes[i]->group, route.group) &&
+            strcmp(routes[i]->prefix, route.prefix)) ||
+           (!strcmp(routes[i]->prefix, route.prefix) &&
+            strcmp(routes[i]->group, route.group))))
         return 0;
     }
-    routes[route_count++] = route;
+    if (!append_route(&route))
+      return 0;
   }
   return !ferror(file) && route_count > 0;
 }
@@ -408,8 +481,19 @@ typedef struct {
   size_t count;
   SkinSource *entries;
 } SkinCatalog;
-static SkinCatalog catalogs[128];
-static size_t catalog_count;
+static SkinCatalog **catalogs;
+static size_t catalog_count, catalog_capacity;
+#ifdef DD_RIG_RUNTIME_TEST
+static void clear_catalogs(void) {
+  for (size_t i = 0; i < catalog_count; ++i) {
+    free(catalogs[i]->entries);
+    free(catalogs[i]);
+  }
+  free(catalogs);
+  catalogs = NULL;
+  catalog_count = catalog_capacity = 0;
+}
+#endif
 
 static void *data_device(void) {
   void *storage = *(void **)(native_address(DD_STORAGE));
@@ -428,10 +512,10 @@ static uint64_t hash_bytes(uint64_t hash, const void *bytes, size_t count) {
 static int add_catalog_files(SkinCatalog *catalog, size_t limit,
                              const NativeFileMatch *files, const char *hero,
                              const char *origin) {
-  ptrdiff_t count = files->begin ? files->end - files->begin : 0;
-  if (count < 0 || count > 4096)
+  size_t count;
+  if (!file_match_count(files, &count))
     return 0;
-  for (ptrdiff_t i = 0; i < count; ++i) {
+  for (size_t i = 0; i < count; ++i) {
     const char *raw = files->begin[i];
     if (!memchr(raw, 0, 256))
       return 0;
@@ -462,7 +546,7 @@ static int add_catalog_files(SkinCatalog *catalog, size_t limit,
 static const SkinCatalog *source_catalog(void *klass) {
   unsigned count = colour_count(klass);
   void *device = data_device();
-  if (!count || count > 512 || !device)
+  if (!count || !device)
     return NULL;
   const char *first = colour_path(klass, 0);
   if (!first || strncmp(first, "heroes/", 7))
@@ -492,7 +576,7 @@ static const SkinCatalog *source_catalog(void *klass) {
     signature = hash_bytes(signature, path, strlen(path) + 1);
   }
   unsigned roots = alternate_count(device);
-  if (roots > 4096)
+  if (roots == UINT_MAX)
     return NULL;
   for (unsigned i = 0; i < roots; ++i) {
     const char *root = alternate_root(device, i);
@@ -502,12 +586,15 @@ static const SkinCatalog *source_catalog(void *klass) {
     signature = hash_bytes(signature, root + 0x200, 16);
   }
   for (size_t i = 0; i < catalog_count; ++i)
-    if (catalogs[i].klass == klass && catalogs[i].signature == signature)
-      return catalogs + i;
+    if (catalogs[i]->klass == klass && catalogs[i]->signature == signature)
+      return catalogs[i];
   SkinCatalog catalog = {klass, signature, 0,
                          calloc(count, sizeof(SkinSource))};
-  if (!catalog.entries)
+  if (!catalog.entries) {
+    dprintf(2, "DD_RIG_PALETTE_CATALOG_REFUSED class=%p reason=allocation\n",
+            klass);
     return NULL;
+  }
   NativeFileMatch files = {0};
   match_device(&files, device, directory, pattern, 0, 0, 0);
   int valid = add_catalog_files(&catalog, count, &files, hero, "");
@@ -543,7 +630,7 @@ static const SkinCatalog *source_catalog(void *klass) {
     valid = n > 0 && (size_t)n < sizeof(expected) &&
             !strcmp(expected, colour_path(klass, (unsigned)i));
   }
-  if (!valid || catalog_count == 128) {
+  if (!valid) {
     dprintf(2, "DD_RIG_PALETTE_CATALOG_REFUSED class=%p native=%u found=%zu\n",
             klass, count, catalog.count);
     free(catalog.entries);
@@ -553,8 +640,25 @@ static const SkinCatalog *source_catalog(void *klass) {
     dprintf(2, "DD_RIG_PALETTE_ENTRY class=%p index=%zu skin=%s source=%s\n",
             klass, i, catalog.entries[i].skin,
             *catalog.entries[i].origin ? catalog.entries[i].origin : "base");
-  catalogs[catalog_count] = catalog;
-  return catalogs + catalog_count++;
+  if (catalog_count == SIZE_MAX) {
+    free(catalog.entries);
+    return NULL;
+  }
+  SkinCatalog **grown = grow_array(catalogs, &catalog_capacity,
+                                   catalog_count + 1, sizeof(*catalogs));
+  if (!grown) {
+    free(catalog.entries);
+    return NULL;
+  }
+  catalogs = grown;
+  SkinCatalog *owned = malloc(sizeof(*owned));
+  if (!owned) {
+    free(catalog.entries);
+    return NULL;
+  }
+  *owned = catalog;
+  catalogs[catalog_count++] = owned;
+  return owned;
 }
 static int runtime_actor(void *actor) {
   void *klass = actor_class(actor);
@@ -576,17 +680,16 @@ static int append_palette_files(NativeFileMatch *files, const char *origin,
   while ((entry = readdir(dir))) {
     if (!image_name(entry->d_name))
       continue;
-    size_t count = (size_t)(files->end - files->begin), i;
+    size_t count = files->begin ? (size_t)(files->end - files->begin) : 0, i;
     for (i = 0; i < count; ++i)
       if (!strcmp(files->begin[i], entry->d_name))
         break;
     if (i < count)
       continue;
-    if (count == 4096 || strlen(entry->d_name) >= 256) {
+    if (!append_file_name(files, entry->d_name)) {
       valid = 0;
       break;
     }
-    snprintf(*files->end++, 256, "%s", entry->d_name);
   }
   closedir(dir);
   return valid;
@@ -607,6 +710,8 @@ static int pinned_texture(char out[512], const char *origin,
     return found;
   void *device = alternate_count ? data_device() : NULL;
   unsigned count = device ? alternate_count(device) : 0;
+  if (count == UINT_MAX)
+    return -1;
   /* Official DLC augments the baseline. Other user Mods must not supply
    * missing textures for a different, independently selected skin entry. */
   for (unsigned i = count; i-- > 0;) {
@@ -629,12 +734,13 @@ static int record_palette(RigPlan *plan, const char *key, const char *actual) {
   if (n < 0 || (size_t)n >= sizeof(directory))
     return 0;
   for (size_t i = 0; i < plan->count; ++i)
-    if (!strcmp(plan->keys[i], key)) {
-      if (*plan->palettes[i] && strcmp(plan->palettes[i], directory)) {
+    if (!strcmp(plan->entries[i].key, key)) {
+      if (*plan->entries[i].palette &&
+          strcmp(plan->entries[i].palette, directory)) {
         dprintf(2, "DD_RIG_TEXTURE_SOURCE_CONFLICT rig=%s\n", key);
         return 0;
       }
-      memcpy(plan->palettes[i], directory, strlen(directory) + 1);
+      memcpy(plan->entries[i].palette, directory, strlen(directory) + 1);
       return 1;
     }
   return 0;
@@ -642,7 +748,7 @@ static int record_palette(RigPlan *plan, const char *key, const char *actual) {
 static const Route *runtime_route(const char *skin, const char *origin) {
   char palette[512];
   RigPlan plan = {0};
-  if (strlen(skin) >= sizeof(routes[0].skin) ||
+  if (strlen(skin) >= sizeof(routes[0]->skin) ||
       !path_join(palette, sizeof(palette), skin, "/anim/") ||
       strncmp(skin, "heroes/", 7))
     return NULL;
@@ -654,25 +760,21 @@ static const Route *runtime_route(const char *skin, const char *origin) {
   if (!origin)
     match_files(&files, 1, palette, ".*\\.(png|PNG|tga|TGA)", 0, 0, 2);
   else {
-    files.begin = calloc(4096, sizeof(*files.begin));
-    if (!files.begin)
-      return NULL;
-    files.end = files.begin;
-    files.capacity = files.begin + 4096;
     valid = append_palette_files(&files, origin, palette) &&
             append_palette_files(&files, "", palette);
     void *device = alternate_count ? data_device() : NULL;
     unsigned roots = device ? alternate_count(device) : 0;
+    valid = valid && roots != UINT_MAX;
     for (unsigned i = roots; valid && i-- > 0;) {
       const char *root = alternate_root(device, i);
       if (root && !strncmp(root, "dlc/", 4))
         valid = append_palette_files(&files, root, palette);
     }
   }
-  ptrdiff_t count = files.begin ? files.end - files.begin : 0;
-  valid = valid && count > 0 && count <= 4096;
+  size_t count = 0;
+  valid = valid && file_match_count(&files, &count) && count > 0;
   void *storage = *(void **)(native_address(DD_STORAGE));
-  for (ptrdiff_t i = 0; valid && i < count; ++i) {
+  for (size_t i = 0; valid && i < count; ++i) {
     char request[512], actual[512] = {0};
     RigPlan candidates = {0};
     const char *file = files.begin[i];
@@ -700,20 +802,23 @@ static const Route *runtime_route(const char *skin, const char *origin) {
     if (found < 0) {
       dprintf(2, "DD_RIG_FILE_REFUSED skin=%s file=%s source=%s\n", skin, file,
               actual);
+      free(candidates.entries);
       valid = 0;
       break;
     }
     if (!found) {
       dprintf(2, "DD_RIG_FILE_UNUSED skin=%s file=%s source=%s\n", skin, file,
               actual);
+      free(candidates.entries);
       continue;
     }
     for (size_t j = 0; valid && j < candidates.count; ++j) {
       dprintf(2, "DD_RIG_FILE_SOURCE skin=%s file=%s source=%s rig=%s\n", skin,
-              file, actual, candidates.keys[j]);
-      valid = add_rig_key(&plan, candidates.keys[j]) &&
-              record_palette(&plan, candidates.keys[j], actual);
+              file, actual, candidates.entries[j].key);
+      valid = add_rig_key(&plan, candidates.entries[j].key) &&
+              record_palette(&plan, candidates.entries[j].key, actual);
     }
+    free(candidates.entries);
   }
   if (origin)
     free(files.begin);
@@ -721,31 +826,40 @@ static const Route *runtime_route(const char *skin, const char *origin) {
     destroy_match(&files);
   if (!valid || !plan.count) {
     dprintf(2, "DD_RIG_SOURCE_REFUSED skin=%s\n", skin);
+    free(plan.entries);
     return NULL;
   }
   sort_plan(&plan);
   for (size_t i = 0; i < route_count; ++i)
-    if (!strcmp(routes[i].skin, skin) &&
-        !strcmp(routes[i].origin, origin ? origin : "") &&
-        same_plan(routes[i].plan, &plan))
-      return routes + i;
-  if (route_count == 128) {
-    dprintf(2, "DD_RIG_SOURCE_CACHE_FULL skin=%s\n", skin);
+    if (!strcmp(routes[i]->skin, skin) &&
+        !strcmp(routes[i]->origin, origin ? origin : "") &&
+        same_plan(routes[i]->plan, &plan)) {
+      free(plan.entries);
+      return routes[i];
+    }
+  RigPlan *owned = malloc(sizeof(*owned));
+  if (!owned) {
+    free(plan.entries);
+    dprintf(2, "DD_RIG_SOURCE_REFUSED skin=%s reason=allocation\n", skin);
     return NULL;
   }
-  RigPlan *owned = malloc(sizeof(*owned));
-  if (!owned)
+  *owned = plan;
+  Route value = {.plan = owned};
+  snprintf(value.skin, sizeof(value.skin), "%s", skin);
+  snprintf(value.origin, sizeof(value.origin), "%s", origin ? origin : "");
+  memcpy(value.hero, skin, (size_t)(separator - skin));
+  memcpy(value.group, "runtime", sizeof("runtime"));
+  Route *route = append_route(&value);
+  if (!route) {
+    free(owned->entries);
+    free(owned);
+    dprintf(2, "DD_RIG_SOURCE_REFUSED skin=%s reason=allocation\n", skin);
     return NULL;
-  memcpy(owned, &plan, sizeof(plan));
-  Route *route = routes + route_count++;
-  route->plan = owned;
-  snprintf(route->skin, sizeof(route->skin), "%s", skin);
-  snprintf(route->origin, sizeof(route->origin), "%s", origin ? origin : "");
-  memcpy(route->hero, skin, (size_t)(separator - skin));
-  memcpy(route->group, "runtime", sizeof("runtime"));
+  }
   dprintf(2,
           "DD_RIG_SOURCE_RESOLVED skin=%s source=%s resources=%zu first=%s\n",
-          skin, origin && *origin ? origin : "base", plan.count, plan.keys[0]);
+          skin, origin && *origin ? origin : "base", plan.count,
+          plan.entries[0].key);
   return route;
 }
 
@@ -770,9 +884,9 @@ static const Route *find_route(void *actor, int colour) {
     return runtime_route(source->skin, source->origin);
   }
   for (size_t i = 0; i < route_count; ++i)
-    if (strlen(routes[i].skin) == skin_length &&
-        !strncmp(skin, routes[i].skin, skin_length))
-      return routes + i;
+    if (strlen(routes[i]->skin) == skin_length &&
+        !strncmp(skin, routes[i]->skin, skin_length))
+      return routes[i];
   return NULL;
 }
 static const Route *resource_route(const Handle *handle, const Route *scope) {
@@ -780,31 +894,43 @@ static const Route *resource_route(const Handle *handle, const Route *scope) {
   const char *name = resource_name(manager, handle);
   return route_for_name(name, scope);
 }
-static size_t select_handles(void *klass, const Route *route, Handle *out,
-                             size_t limit) {
-  Handles *all = (void *)((char *)klass + 0xe0);
-  if (!all->begin || all->end < all->begin || all->end - all->begin > 512)
+static size_t select_handles(void *klass, const Route *route, Handles *out) {
+  const Handles *all = (const void *)((const char *)klass + 0xe0);
+  uintptr_t begin = (uintptr_t)all->begin, end = (uintptr_t)all->end,
+            capacity = (uintptr_t)all->capacity;
+  if (!begin || end < begin || capacity < end ||
+      (end - begin) % sizeof(Handle) || (capacity - begin) % sizeof(Handle))
     return 0;
-  size_t count = 0;
-  for (const Handle *h = all->begin; h < all->end; ++h) {
-    if (!same_group(route, resource_route(h, route)))
-      continue;
-    if (count == limit)
-      return 0;
-    out[count++] = *h;
-  }
-  return count;
+  size_t total = (end - begin) / sizeof(Handle);
+  if (!total)
+    return 0;
+  out->begin = calloc(total, sizeof(*out->begin));
+  if (!out->begin)
+    return 0;
+  out->end = out->begin;
+  out->capacity = out->begin + total;
+  for (const Handle *h = all->begin; h < all->end; ++h)
+    if (same_group(route, resource_route(h, route)))
+      *out->end++ = *h;
+  return (size_t)(out->end - out->begin);
 }
 static void *make_sprite(void *klass, const Route *route) {
-  Handle selected[256];
   if (route->plan) {
     size_t count = route->plan->count, loaded = 0;
+    if (!count)
+      return NULL;
+    Handle *selected = calloc(count, sizeof(*selected));
+    if (!selected) {
+      dprintf(2, "DD_RIG_SPRITE_REFUSED skin=%s reason=allocation\n",
+              route->skin);
+      return NULL;
+    }
     void *manager = *(void **)(native_address(DD_RESOURCE));
     const uint64_t empty_callback[DD_FUNCTION_WORDS]
         __attribute__((aligned(16))) = {0};
     int valid = 1;
     for (size_t i = 0; valid && i < count; ++i) {
-      const char *key = route->plan->keys[i];
+      const char *key = route->plan->entries[i].key;
       load_spine(selected + i, key, 0, empty_callback);
       ++loaded;
       const char *registered = resource_name(manager, selected + i);
@@ -816,20 +942,32 @@ static void *make_sprite(void *klass, const Route *route) {
     void *sprite = valid ? native_new(&view, 0) : NULL;
     for (size_t i = 0; i < loaded; ++i)
       release_spine(selected + i);
+    free(selected);
     dprintf(2, "DD_RIG_RUNTIME_CREATED sprite=%p first=%s resources=%zu\n",
-            sprite, route->plan->keys[0], loaded);
+            sprite, route->plan->entries[0].key, loaded);
     return sprite;
   }
-  size_t count = select_handles(klass, route, selected, 256);
-  if (!count) {
-    dprintf(2, "DD_RIG_UNAVAILABLE group=%s class=%p\n", route->group, klass);
-    return NULL;
-  }
-  Handles view = {selected, selected + count, selected + count};
-  void *sprite = native_new(&view, 0);
+  Handles selected = {0};
+  size_t count = select_handles(klass, route, &selected);
+  void *sprite = count ? native_new(&selected, 0) : NULL;
+  free(selected.begin);
   dprintf(2, "DD_RIG_CREATED sprite=%p group=%s resources=%zu\n", sprite,
           route->group, count);
   return sprite;
+}
+/* Keep the game's original constructor arguments as a fallback. In particular,
+ * a failed custom route must never terminate the process hosting this plugin.
+ */
+static void *create_actor_sprite(const Handles *original, int flag, void *klass,
+                                 const Route **route) {
+  void *sprite = *route ? make_sprite(klass, *route) : NULL;
+  if (sprite)
+    return sprite;
+  dprintf(2, "DD_RIG_ACTOR_FALLBACK class=%p reason=%s skin=%s\n", klass,
+          *route ? "sprite_load" : "route_unavailable",
+          *route ? (*route)->skin : "unknown");
+  *route = NULL;
+  return native_new(original, flag);
 }
 static int sprite_matches(void *sprite, const Route *route) {
   if (!sprite)
@@ -848,7 +986,7 @@ static int sprite_matches(void *sprite, const Route *route) {
     for (size_t i = 0; i < route->plan->count; ++i) {
       const Handle *handle = (const void *)(begin + i * 0x30);
       const char *name = resource_name(manager, handle);
-      if (!name || strcmp(name, route->plan->keys[i]))
+      if (!name || strcmp(name, route->plan->entries[i].key))
         return 0;
     }
     return 1;
@@ -864,7 +1002,7 @@ static void override_each(void *sprite, const RigPlan *plan) {
      * PerSpineDataState so native texture ownership/refcounts stay intact. */
     memcpy(view + 0x20, &begin, sizeof(begin));
     memcpy(view + 0x28, &end, sizeof(end));
-    original_override(view, plan->palettes[i]);
+    original_override(view, plan->entries[i].palette);
   }
 }
 /* A skin entry owns a provider, not merely a normalized logical directory.
@@ -937,13 +1075,8 @@ void dd_runtime_test_bind(
   /* Addresses inside the synthetic memory owned by this test adapter. */
   native_symbols.values[DD_STORAGE] = 0x1d744f0;
   native_symbols.values[DD_RESOURCE] = 0x31c2b58;
-  for (size_t i = 0; i < route_count; ++i)
-    free(routes[i].plan);
-  route_count = 0;
-  memset(routes, 0, sizeof(routes));
-  for (size_t i = 0; i < catalog_count; ++i)
-    free(catalogs[i].entries);
-  catalog_count = 0;
+  clear_routes();
+  clear_catalogs();
   preserve_palette_sources = 0;
   alternate_count = NULL;
   override_route = NULL;
@@ -955,6 +1088,19 @@ void dd_runtime_test_bind(
   get_resource = get;
   native_new = create;
   resource_name = name;
+}
+void *dd_runtime_test_actor_sprite(const char *skin, const Handles *original,
+                                   int flag) {
+  const Route *route = runtime_route(skin, NULL);
+  return create_actor_sprite(original, flag, NULL, &route);
+}
+const void *dd_runtime_test_route(const char *skin) {
+  return runtime_route(skin, NULL);
+}
+int dd_runtime_test_saved_route(const void *saved, const char *skin) {
+  const Route *route = saved;
+  return route && !strcmp(route->skin, skin) && route->plan &&
+         route->plan->count && *route->plan->entries[0].key;
 }
 void *dd_runtime_test_sprite(const char *skin) {
   const Route *route = runtime_route(skin, NULL);
@@ -971,8 +1117,9 @@ void *dd_runtime_test_sprite_at(const char *skin, const char *origin) {
 const char *dd_runtime_test_texture(const char *skin, const char *origin,
                                     unsigned index) {
   const Route *route = runtime_route(skin, origin);
-  return route && index < route->plan->count ? route->plan->palettes[index]
-                                             : NULL;
+  return route && index < route->plan->count
+             ? route->plan->entries[index].palette
+             : NULL;
 }
 void dd_runtime_test_bind_sources(
     unsigned (*count)(void *), const char *(*path)(void *, unsigned),
@@ -1023,24 +1170,28 @@ static void native_two_sprite_test(void *klass, const Route *scope) {
     return;
   const Route *a = NULL, *b = NULL;
   for (size_t i = 0; i < route_count; ++i) {
-    if (!same_hero(scope, routes + i))
+    if (!same_hero(scope, routes[i]))
       continue;
     if (!a)
-      a = routes + i;
-    else if (!same_group(a, routes + i)) {
-      b = routes + i;
+      a = routes[i];
+    else if (!same_group(a, routes[i])) {
+      b = routes[i];
       break;
     }
   }
   if (!a || !b)
     return;
-  Handle probe[256];
-  if (!select_handles(klass, a, probe, 256) ||
-      !select_handles(klass, b, probe, 256))
+  Handles probe = {0};
+  size_t first = select_handles(klass, a, &probe);
+  free(probe.begin);
+  probe = (Handles){0};
+  size_t second = select_handles(klass, b, &probe);
+  free(probe.begin);
+  if (!first || !second)
     return;
   for (size_t i = 0; i < route_count; ++i)
-    if (same_hero(scope, routes + i))
-      routes[i].tested = 1;
+    if (same_hero(scope, routes[i]))
+      routes[i]->tested = 1;
   void *left = make_sprite(klass, a), *right = make_sprite(klass, b);
   if (left && right) {
     set_animation(left, "idle", 1, 1);
@@ -1066,16 +1217,10 @@ static void native_two_sprite_test(void *klass, const Route *scope) {
 }
 static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
   const Route *route = find_route(actor, int_at(actor, 0xb68));
-  if (!route && runtime_enabled && runtime_actor(actor))
-    _exit(125);
-  if (!route)
-    return native_new(original, flag);
   void *klass = actor_class(actor);
-  void *sprite = make_sprite(klass, route);
-  if (!sprite && runtime_enabled && runtime_actor(actor))
-    _exit(125);
-  if (!sprite)
-    return native_new(original, flag);
+  void *sprite = create_actor_sprite(original, flag, klass, &route);
+  if (!route)
+    return sprite;
   dprintf(2, "DD_RIG_ACTOR_INIT actor=%p sprite=%p skin=%s group=%s\n", actor,
           sprite, route->skin, route->group);
   if (!runtime_enabled)
@@ -1168,6 +1313,8 @@ static void change_preview(void *panel, void *actor) {
                 actor, old, sprite, route->group);
         return;
       }
+      dprintf(2, "DD_RIG_PREVIEW_REFUSED reason=sprite_load\n");
+      return;
     }
   }
   apply_preview(panel, actor, route);
@@ -1354,14 +1501,16 @@ int main(int argc, char **argv) {
                 "heroes/beta/beta_A vanilla common.rig_vanilla.\n"
                 "heroes/beta/beta_B custom common.\n"))
     return 1;
-  if (same_group(routes, routes + 3) || !same_group(routes, routes + 2) ||
-      route_for_name("anim/common.rig_vanilla.idle.skel", routes + 4) !=
-          routes + 3 ||
-      route_for_name("common.idle.skel", routes) != routes + 1 ||
-      route_for_name("heroes/alpha/anim/common.idle.skel", routes + 3) ||
-      route_for_name("heroes/beta/anim/common.idle.skel", routes + 3) !=
-          routes + 4 ||
-      route_for_name("unmapped.idle.skel", routes))
+  if (route_count != 5 || route_capacity < 5 || !routes)
+    return 1;
+  if (same_group(routes[0], routes[3]) || !same_group(routes[0], routes[2]) ||
+      route_for_name("anim/common.rig_vanilla.idle.skel", routes[4]) !=
+          routes[3] ||
+      route_for_name("common.idle.skel", routes[0]) != routes[1] ||
+      route_for_name("heroes/alpha/anim/common.idle.skel", routes[3]) ||
+      route_for_name("heroes/beta/anim/common.idle.skel", routes[3]) !=
+          routes[4] ||
+      route_for_name("unmapped.idle.skel", routes[0]))
     return 2;
   const char *invalid[] = {"heroes/alpha/alpha_A vanilla common. extra\n",
                            "heroes/alpha/../alpha_A vanilla common.\n",

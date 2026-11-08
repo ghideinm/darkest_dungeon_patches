@@ -252,6 +252,112 @@ class WindowsProfileTest(unittest.TestCase):
 
 
 class WindowsProxyRuntimeTest(unittest.TestCase):
+    def test_actor_failure_falls_back_and_native_vectors_exceed_old_limits(self):
+        compiler, runner = (os.getenv(n) for n in ("DD_WINDOWS_CC", "DD_WINDOWS_RUNNER"))
+        if not compiler or not runner:
+            self.skipTest("Set DD_WINDOWS_CC and DD_WINDOWS_RUNNER for native fixtures")
+        with tempfile.TemporaryDirectory(prefix="dd-windows-actor-") as directory:
+            root = Path(directory)
+            source = root / "actor.c"
+            source.write_text(
+                '#include "'
+                + (COMMON_NATIVE / "skin_rig_patch.c").as_posix()
+                + '"\n#include <assert.h>\n'
+                + r"""
+static unsigned char klass[0x700];
+static const Handles *expected_original;
+static unsigned released, fallback_calls;
+static void *get_class(void *actor) {(void)actor;return klass;}
+static void *fallback(const Handles *handles,int flag) {
+  if(!flag) return NULL; /* Simulate a failed routed sprite constructor. */
+  assert(handles == expected_original && flag == 7);
+  ++fallback_calls;return (void*)0x1234;
+}
+static void load(Handle *out,const char *key,int defaults,const void *callback) {
+  (void)key;(void)defaults;(void)callback;*out=(Handle){0,1,NULL};
+}
+static void release_handle(Handle *handle) {assert(handle->index==0);++released;}
+static const char *registered_name(void *manager,const Handle *handle) {
+  (void)manager;(void)handle;return ">heroes/alpha/anim/alpha.skel";
+}
+static int loaded;
+static void *get(void *manager,const Handle *handle) {
+  (void)manager;(void)handle;return loaded ? (void*)1 : NULL;
+}
+int main(void) {
+  void *table[8]={0};table[6]=(void*)get_class;
+  unsigned char actor[0xc00]={0};
+  void *table_address=table;
+  memcpy(actor,&table_address,sizeof(table_address));
+  char (*palettes)[512]=calloc(600,sizeof(*palettes));assert(palettes);
+  void *end=palettes+600;
+  memcpy(klass+0x5e0,&palettes,sizeof(palettes));
+  memcpy(klass+0x5e8,&end,sizeof(end));
+  assert(windows_colour_count(klass)==600);
+  unsigned char device[0x20]={0};
+  void *roots=calloc(4200,0x210);assert(roots);end=(char*)roots+4200*0x210;
+  memcpy(device+8,&roots,sizeof(roots));memcpy(device+16,&end,sizeof(end));
+  assert(windows_alternate_count(device)==4200);
+  end=(char*)roots+1;memcpy(device+16,&end,sizeof(end));
+  assert(windows_alternate_count(device)==UINT_MAX);
+  free(roots);
+  end=palettes+1;memcpy(klass+0x5e8,&end,sizeof(end));
+  strcpy(palettes[0],"heroes/alpha/alpha_A/");
+  colour_count=windows_colour_count;colour_path=windows_colour_path;
+  native_new=fallback;
+  Handle handle={42,9,NULL};Handles original={&handle,&handle+1,&handle+1};
+  expected_original=&original;
+  assert(new_actor_sprite(&original,7,actor)==(void*)0x1234);
+  assert(fallback_calls==1);
+  RigPlan *plan=calloc(1,sizeof(*plan));assert(plan);
+  assert(add_rig_key(plan,">heroes/alpha/anim/alpha.skel"));
+  Route route={.plan=plan};
+  strcpy(route.skin,"heroes/alpha/alpha_A");
+  strcpy(route.hero,"heroes/alpha");
+  assert(append_route(&route));
+  void *manager=(void*)1;base=(uintptr_t)&manager;
+  native_symbols.values[DD_RESOURCE]=0;
+  load_spine=load;release_spine=release_handle;
+  resource_name=registered_name;get_resource=get;
+  assert(new_actor_sprite(&original,7,actor)==(void*)0x1234);
+  assert(fallback_calls==2 && released==1);
+  loaded=1;
+  assert(new_actor_sprite(&original,7,actor)==(void*)0x1234);
+  assert(fallback_calls==3 && released==2);
+  clear_routes();free(palettes);
+  puts("OWN_ACTOR_FALLBACK_OK");return 0;
+}
+"""
+            )
+            binary = root / "actor.exe"
+            subprocess.run(
+                [
+                    compiler,
+                    "-std=c11",
+                    "-O2",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                    "-I",
+                    str(WINDOWS_NATIVE),
+                    str(source),
+                    "-lm",
+                    "-o",
+                    str(binary),
+                ],
+                check=True,
+            )
+            result = subprocess.run(
+                [runner, str(binary)],
+                cwd=root,
+                env=dict(os.environ, WINEDEBUG="-all", WINEDLLOVERRIDES="winemenubuilder.exe=d"),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("OWN_ACTOR_FALLBACK_OK", result.stdout)
+
     def test_automatic_plugin_and_unmodified_fallback_on_own_executable(self):
         compiler, runner, proxy = (
             os.getenv(n) for n in ("DD_WINDOWS_CC", "DD_WINDOWS_RUNNER", "DD_WINDOWS_PROXY")
