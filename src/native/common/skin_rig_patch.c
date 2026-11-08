@@ -169,12 +169,37 @@ static int image_name(const char *name) {
   return extension &&
          (!strcasecmp(extension, ".png") || !strcasecmp(extension, ".tga"));
 }
-static int atlas_uses_file(const char *atlas, const char *file) {
+typedef struct {
+  char **names;
+  size_t count, capacity;
+} AtlasPages;
+static void clear_atlas_pages(AtlasPages *pages) {
+  for (size_t i = 0; i < pages->count; ++i)
+    free(pages->names[i]);
+  free(pages->names);
+}
+static int append_atlas_page(AtlasPages *pages, const char *name) {
+  if (pages->count == SIZE_MAX)
+    return 0;
+  char **grown = grow_array(pages->names, &pages->capacity, pages->count + 1,
+                            sizeof(*pages->names), 16);
+  if (!grown)
+    return 0;
+  pages->names = grown;
+  size_t length = strlen(name) + 1;
+  char *owned = malloc(length);
+  if (!owned)
+    return 0;
+  memcpy(owned, name, length);
+  pages->names[pages->count++] = owned;
+  return 1;
+}
+static int atlas_pages(const char *atlas, AtlasPages *files) {
   FILE *input = fopen(atlas, "r");
   if (!input)
     return -1;
   char line[1024], page[1024] = {0};
-  int found = 0, pages = 0, valid = 1;
+  int valid = 1;
   while (fgets(line, sizeof(line), input)) {
     if (!strchr(line, '\n') && !feof(input)) {
       valid = 0;
@@ -188,20 +213,33 @@ static int atlas_uses_file(const char *atlas, const char *file) {
     line[length] = 0;
     if (*page && (!strncmp(line, "size:", 5) || !strncmp(line, "format:", 7) ||
                   !strncmp(line, "filter:", 7))) {
-      ++pages;
-      const char *leaf = strrchr(page, '/');
-      leaf = leaf ? leaf + 1 : page;
-      if (!strcmp(leaf, file))
-        found = 1;
+      if (!append_atlas_page(files, page)) {
+        valid = 0;
+        break;
+      }
     }
     if (*line && !strchr(" \t", line[0]) && image_name(line))
       memcpy(page, line, strlen(line) + 1);
     else
       *page = 0;
   }
-  valid = valid && !ferror(input) && pages > 0;
+  valid = valid && !ferror(input) && files->count;
   fclose(input);
-  return valid ? found : -1;
+  return valid ? 1 : -1;
+}
+static int atlas_uses_file(const char *atlas, const char *file) {
+  AtlasPages files = {0};
+  int result = atlas_pages(atlas, &files);
+  if (result == 1) {
+    result = 0;
+    for (size_t i = 0; i < files.count; ++i) {
+      const char *page = files.names[i], *leaf = strrchr(page, '/');
+      if (!strcmp(leaf ? leaf + 1 : page, file))
+        result = 1;
+    }
+  }
+  clear_atlas_pages(&files);
+  return result;
 }
 static int add_rig_key(RigPlan *plan, const char *key) {
   const char *leaf = strrchr(key, '/');
@@ -809,7 +847,255 @@ static int record_palette(RigPlan *plan, const char *key, const char *actual) {
     }
   return 0;
 }
-static const Route *runtime_route(const char *skin, const char *origin) {
+/* A class present in the base game or official DLC retains its existing skin
+ * isolation. Only a class supplied by user Mods needs a mounted Mod baseline.
+ */
+static int mod_class(const char *hero, void *device, unsigned roots) {
+  struct stat info;
+  if (!stat(hero, &info))
+    return S_ISDIR(info.st_mode) ? 0 : -1;
+  if (errno != ENOENT)
+    return -1;
+  char cwd[4096];
+  if (!getcwd(cwd, sizeof(cwd)))
+    return -1;
+  for (unsigned i = 0; i < roots; ++i) {
+    const char *root = alternate_root(device, i);
+    char path[1024];
+    if (!root || !memchr(root, 0, 512))
+      return -1;
+    if (!*root || !palette_official_source(root, cwd))
+      continue;
+    if (!path_join(path, sizeof(path), root, hero))
+      return -1;
+    if (!stat(path, &info))
+      return S_ISDIR(info.st_mode) ? 0 : -1;
+    if (errno != ENOENT)
+      return -1;
+  }
+  return 1;
+}
+/* Enumerate names only. A broken lower-priority copy must not invalidate an
+ * action already supplied by the selected skin or the game's winning Mod. */
+static int append_rig_names(NativeFileMatch *files, const char *directory) {
+  DIR *dir = opendir(directory);
+  if (!dir)
+    return errno == ENOENT;
+  int valid = 1;
+  struct dirent *entry;
+  while ((entry = readdir(dir))) {
+    size_t length = strlen(entry->d_name);
+    if (length < 6 || strcmp(entry->d_name + length - 5, ".skel") ||
+        strstr(entry->d_name, ".rig_vanilla.") ||
+        strstr(entry->d_name, ".sprite.rig_"))
+      continue;
+    size_t count = files->begin ? (size_t)(files->end - files->begin) : 0, i;
+    for (i = 0; i < count; ++i)
+      if (!strcmp(files->begin[i], entry->d_name))
+        break;
+    if (i == count && !append_file_name(files, entry->d_name)) {
+      valid = 0;
+      break;
+    }
+  }
+  closedir(dir);
+  return valid;
+}
+static int has_rig_leaf(const RigPlan *plan, const char *leaf) {
+  for (size_t i = 0; i < plan->count; ++i) {
+    const char *other = strrchr(plan->entries[i].key, '/');
+    if (other && !strcmp(other + 1, leaf))
+      return 1;
+  }
+  return 0;
+}
+static int rig_atlas(char atlas[512], const char *key) {
+  size_t length = strlen(key);
+  struct stat info;
+  if (length < 6 || key[0] != '>' || strcmp(key + length - 5, ".skel") ||
+      stat(key + 1, &info) || !S_ISREG(info.st_mode) || info.st_size <= 0 ||
+      (uint64_t)info.st_size > dd_rig_file_limit())
+    return 0;
+  int n = snprintf(atlas, 512, "%.*s.atlas", (int)length - 6, key + 1);
+  return n > 0 && n < 512 && !stat(atlas, &info) && S_ISREG(info.st_mode) &&
+         info.st_size > 0;
+}
+/* Native path lookup is authoritative for mounted-root precedence. Directory
+ * enumeration below only discovers possible names, never picks a provider. */
+static int mounted_path(char out[512], void *storage, const char *request) {
+  if (!full_path(storage, 1, request, out, 512))
+    return 0;
+  size_t length = strlen(out), suffix = strlen(request);
+  if (length < suffix || (length > suffix && out[length - suffix - 1] != '/'))
+    return -1;
+  for (size_t i = 0; i < suffix; ++i)
+    if (palette_path_char((unsigned char)out[length - suffix + i]) !=
+        palette_path_char((unsigned char)request[i]))
+      return -1;
+  struct stat info;
+  return !stat(out, &info) && S_ISREG(info.st_mode) && info.st_size > 0 ? 1
+                                                                        : -1;
+}
+static int class_rig_layer(RigPlan *plan, const char *origin,
+                           const char *relative, void *storage, void *device,
+                           unsigned roots) {
+  NativeFileMatch files = {0};
+  char directory[1024];
+  int valid =
+      path_join(directory, sizeof(directory), origin ? origin : "", relative) &&
+      append_rig_names(&files, directory);
+  if (!origin) {
+    for (unsigned i = 0; valid && i < roots; ++i) {
+      const char *root = alternate_root(device, i);
+      valid = root && memchr(root, 0, 512) &&
+              path_join(directory, sizeof(directory), root, relative) &&
+              append_rig_names(&files, directory);
+    }
+  }
+  for (char (*file)[256] = files.begin; valid && file != files.end; ++file) {
+    if (has_rig_leaf(plan, *file))
+      continue;
+    char request[512], actual[512], key[513], atlas[512];
+    valid = path_join(request, sizeof(request), relative, *file);
+    if (valid)
+      valid = origin ? path_join(actual, sizeof(actual), origin, request)
+                     : mounted_path(actual, storage, request) == 1;
+    if (valid)
+      valid = snprintf(key, sizeof(key), ">%s", actual) < (int)sizeof(key) &&
+              rig_atlas(atlas, key) && add_rig_key(plan, key);
+    if (!valid)
+      dprintf(2, "DD_RIG_CLASS_FALLBACK_REFUSED action=%s directory=%s\n",
+              *file, relative);
+  }
+  free(files.begin);
+  return valid;
+}
+static int rig_from_origin(const char *key, const char *origin,
+                           const char *hero) {
+  char prefix[1024];
+  if (!*origin || !path_join(prefix, sizeof(prefix), origin, hero) ||
+      !path_join(prefix, sizeof(prefix), prefix, "/"))
+    return 0;
+  size_t length = strlen(prefix);
+  if (*key != '>' || strlen(key + 1) < length)
+    return 0;
+  for (size_t i = 0; i < length; ++i)
+    if (palette_path_char((unsigned char)key[i + 1]) !=
+        palette_path_char((unsigned char)prefix[i]))
+      return 0;
+  return 1;
+}
+static int class_texture(char actual[512], const char *origin, const char *hero,
+                         const char *palette, const char *page, const char *key,
+                         void *storage, const SkinCatalog *catalog) {
+  char request[512];
+  if (!path_join(request, sizeof(request), palette, page))
+    return -1;
+  int found = disk_texture(actual, origin, request);
+  if (found)
+    return found;
+  found = mounted_path(actual, storage, request);
+  if (found || !catalog)
+    return found;
+  /* New palette letters need not duplicate the base Mod's action images.
+   * Prefer a baseline palette of the action provider, then native catalogue
+   * order. Each logical candidate is still resolved by the game itself. */
+  for (int pass = 0; pass < 2; ++pass)
+    for (size_t i = 0; i < catalog->count; ++i) {
+      const SkinSource *entry = catalog->entries + i;
+      if (rig_from_origin(key, entry->origin, hero) != !pass)
+        continue;
+      char directory[512];
+      if (!path_join(directory, sizeof(directory), entry->skin, "/anim/") ||
+          !path_join(request, sizeof(request), directory, page))
+        return -1;
+      found = mounted_path(actual, storage, request);
+      if (found)
+        return found;
+    }
+  return 0;
+}
+static int class_rig_plan(const char *skin, const char *origin,
+                          const char *hero, const char *palette, void *device,
+                          unsigned roots, const SkinCatalog *catalog,
+                          RigPlan *plan) {
+  void *storage = *(void **)(native_address(DD_STORAGE));
+  char common[512];
+  if (!path_join(common, sizeof(common), hero, "/anim/") ||
+      !class_rig_layer(plan, origin, palette, storage, device, roots) ||
+      !class_rig_layer(plan, origin, common, storage, device, roots) ||
+      !class_rig_layer(plan, NULL, palette, storage, device, roots) ||
+      !class_rig_layer(plan, NULL, common, storage, device, roots))
+    return 0;
+  /* Some custom classes put their baseline actions beside palette A (or the
+   * provider's first native palette), rather than in the class-wide folder. */
+  for (size_t i = 0; catalog && i < catalog->count; ++i) {
+    size_t previous;
+    for (previous = 0; previous < i; ++previous)
+      if (!strcmp(catalog->entries[previous].origin,
+                  catalog->entries[i].origin))
+        break;
+    if (previous != i)
+      continue;
+    char baseline[512];
+    if (!path_join(baseline, sizeof(baseline), catalog->entries[i].skin,
+                   "/anim/") ||
+        !class_rig_layer(plan, NULL, baseline, storage, device, roots))
+      return 0;
+  }
+  for (size_t i = 0; i < plan->count;) {
+    RigEntry *entry = plan->entries + i;
+    char atlas[512];
+    AtlasPages pages = {0};
+    int valid = rig_atlas(atlas, entry->key) && atlas_pages(atlas, &pages) == 1;
+    size_t found = 0;
+    for (size_t j = 0; valid && j < pages.count; ++j) {
+      const char *page = pages.names[j];
+      char actual[512], directory[513];
+      int resolved = class_texture(actual, origin, hero, palette, page,
+                                   entry->key, storage, catalog);
+      if (resolved < 0) {
+        valid = 0;
+        break;
+      }
+      if (!resolved)
+        continue;
+      ++found;
+      size_t length = strlen(actual), suffix = strlen(page);
+      valid = length >= suffix &&
+              snprintf(directory, sizeof(directory), ">%.*s",
+                       (int)(length - suffix), actual) < (int)sizeof(directory);
+      if (valid && *entry->palette && strcmp(entry->palette, directory))
+        valid = 0; /* A native state has one texture directory for its atlas. */
+      if (valid)
+        valid = dd_copy(entry->palette, sizeof(entry->palette), directory);
+    }
+    size_t required = pages.count;
+    clear_atlas_pages(&pages);
+    /* A class-wide directory can also contain effects with their own texture
+     * scheme. They are not palette actions. Keep explicit skin overrides and
+     * partially missing action atlases strict, rather than hiding bad files. */
+    if (valid && !found && !rig_from_origin(entry->key, origin, skin)) {
+      dprintf(2, "DD_RIG_CLASS_ACTION_UNUSED skin=%s rig=%s\n", skin,
+              entry->key);
+      memmove(entry, entry + 1, (plan->count - i - 1) * sizeof(*entry));
+      --plan->count;
+      continue;
+    }
+    valid = valid && found == required && found;
+    if (!valid) {
+      dprintf(2, "DD_RIG_CLASS_TEXTURE_REFUSED skin=%s rig=%s\n", skin,
+              entry->key);
+      return 0;
+    }
+    dprintf(2, "DD_RIG_CLASS_ACTION skin=%s rig=%s textures=%s\n", skin,
+            entry->key, entry->palette);
+    ++i;
+  }
+  return plan->count > 0;
+}
+static const Route *runtime_route(const char *skin, const char *origin,
+                                  const SkinCatalog *catalog) {
   char palette[512];
   RigPlan plan = {0};
   if (strlen(skin) >= sizeof(routes[0]->skin) ||
@@ -819,6 +1105,25 @@ static const Route *runtime_route(const char *skin, const char *origin) {
   const char *separator = strchr(skin + 7, '/');
   if (!separator || strchr(separator + 1, '/'))
     return NULL;
+  char hero[256];
+  size_t hero_length = (size_t)(separator - skin);
+  memcpy(hero, skin, hero_length);
+  hero[hero_length] = 0;
+  if (origin && *origin) {
+    void *device = alternate_count ? data_device() : NULL;
+    unsigned roots = device ? alternate_count(device) : 0;
+    int custom = roots == UINT_MAX ? -1 : mod_class(hero, device, roots);
+    if (custom < 0)
+      return NULL;
+    if (custom) {
+      if (!class_rig_plan(skin, origin, hero, palette, device, roots, catalog,
+                          &plan)) {
+        free(plan.entries);
+        return NULL;
+      }
+      goto resolved;
+    }
+  }
   NativeFileMatch files = {0};
   int valid = 1;
   if (!origin)
@@ -893,6 +1198,7 @@ static const Route *runtime_route(const char *skin, const char *origin) {
     free(plan.entries);
     return NULL;
   }
+resolved:
   sort_plan(&plan);
   for (size_t i = 0; i < route_count; ++i)
     if (!strcmp(routes[i]->skin, skin) &&
@@ -948,7 +1254,7 @@ static const Route *find_route(void *actor, int colour) {
     if (colour < 0 || (size_t)colour >= catalog->count)
       return NULL;
     const SkinSource *source = catalog->entries + colour;
-    return runtime_route(source->skin, source->origin);
+    return runtime_route(source->skin, source->origin, catalog);
   }
   for (size_t i = 0; i < route_count; ++i)
     if (strlen(routes[i]->skin) == skin_length &&
@@ -1160,11 +1466,11 @@ void dd_runtime_test_bind(
 }
 void *dd_runtime_test_actor_sprite(const char *skin, const Handles *original,
                                    int flag) {
-  const Route *route = runtime_route(skin, NULL);
+  const Route *route = runtime_route(skin, NULL, NULL);
   return create_actor_sprite(original, flag, NULL, &route);
 }
 const void *dd_runtime_test_route(const char *skin) {
-  return runtime_route(skin, NULL);
+  return runtime_route(skin, NULL, NULL);
 }
 int dd_runtime_test_saved_route(const void *saved, const char *skin) {
   const Route *route = saved;
@@ -1172,20 +1478,20 @@ int dd_runtime_test_saved_route(const void *saved, const char *skin) {
          route->plan->count && *route->plan->entries[0].key;
 }
 void *dd_runtime_test_sprite(const char *skin) {
-  const Route *route = runtime_route(skin, NULL);
+  const Route *route = runtime_route(skin, NULL, NULL);
   return route ? make_sprite(NULL, route) : NULL;
 }
 int dd_runtime_test_matches(void *sprite, const char *skin) {
-  const Route *route = runtime_route(skin, NULL);
+  const Route *route = runtime_route(skin, NULL, NULL);
   return route && sprite_matches(sprite, route);
 }
 void *dd_runtime_test_sprite_at(const char *skin, const char *origin) {
-  const Route *route = runtime_route(skin, origin);
+  const Route *route = runtime_route(skin, origin, NULL);
   return route ? make_sprite(NULL, route) : NULL;
 }
 const char *dd_runtime_test_texture(const char *skin, const char *origin,
                                     unsigned index) {
-  const Route *route = runtime_route(skin, origin);
+  const Route *route = runtime_route(skin, origin, NULL);
   return route && index < route->plan->count
              ? route->plan->entries[index].palette
              : NULL;
