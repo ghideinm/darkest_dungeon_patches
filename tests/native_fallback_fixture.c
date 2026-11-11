@@ -77,23 +77,33 @@ static void late_preview(void *panel, void *target) {
   assert(route && sprite_matches(pointer_at(preview_node, 0x60), route));
   ++previews;
 }
-static void check_late_actor(int preview_first) {
+static void late_colour(void *target, int colour) {
+  if (pointer_at(target, DD_ACTOR_SPRITE_OFFSET))
+    apply(target, colour);
+  else {
+    /* Native town heroes change the index without loading their actor sprite. */
+    memcpy((char *)target + 0xb68, &colour, sizeof(colour));
+    ++applied;
+  }
+}
+static void check_late_actor(int mode) {
   clear_routes();
   clear_catalogs();
   failure = refuse_tracking = 0;
-  original_colour = apply;
+  original_colour = late_colour;
   original_override = textures;
   original_preview = late_preview;
   int colour = 0;
   memcpy(actor + 0xb68, &colour, sizeof(colour));
-  void *sprite = create(&native_handles, 0);
+  void *sprite = mode == 2 ? NULL : create(&native_handles, 0);
   put_pointer(actor, DD_ACTOR_SPRITE_OFFSET, sprite);
 #ifdef _WIN32
-  put_pointer(sprite, 0x50, callback_owner);
+  if (sprite)
+    put_pointer(sprite, 0x50, callback_owner);
 #endif
   put_pointer(preview_node, 0x60, create(&native_handles, 0));
   assert(!actor_sprite_slot(actor, 0) && native_actor_sprite(actor));
-  if (preview_first)
+  if (mode)
     change_preview(klass, actor);
   else {
     unsigned before = applied;
@@ -113,15 +123,28 @@ static void check_late_actor(int preview_first) {
   assert(!native_actor_sprite(actor));
   assert(!actor_sprite_slot(actor, 0)->pending);
   assert(int_at(actor, 0xb68) == 1); /* Official choices remain masked. */
-  assert(sprite_matches(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET),
-                        find_route(actor, 1)));
+  if (mode == 2)
+    assert(!pointer_at(actor, DD_ACTOR_SPRITE_OFFSET));
+  else {
+    assert(sprite_matches(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET),
+                          find_route(actor, 1)));
 #ifdef _WIN32
-  assert(pointer_at(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET), 0x50) ==
-         callback_owner);
+    assert(pointer_at(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET), 0x50) ==
+           callback_owner);
 #endif
+  }
   change_colour(actor, 2);
   assert(int_at(actor, 0xb68) == 2);
   change_preview(klass, actor);
+  if (mode == 2) {
+    /* Loading its real assets later must retain the newly selected skin. */
+    assert(!pointer_at(actor, DD_ACTOR_SPRITE_OFFSET));
+    put_pointer(actor, DD_ACTOR_SPRITE_OFFSET,
+                new_actor_sprite(&native_handles, 7, actor));
+    assert(!native_actor_sprite(actor));
+    assert(sprite_matches(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET),
+                          find_route(actor, 2)));
+  }
   free(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET));
   free(pointer_at(preview_node, 0x60));
 }
@@ -234,6 +257,7 @@ int main(int argc, char **argv) {
   clear_catalogs();
   check_late_actor(0);
   check_late_actor(1);
+  check_late_actor(2);
   clear_routes();
   clear_catalogs();
   puts("NATIVE_FALLBACK_OK");

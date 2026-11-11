@@ -1390,15 +1390,15 @@ static int native_actor_sprite(void *actor) {
          entry->sprite != pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
 }
 /* A pending entry remains native for preview/fallback purposes until the
- * existing colour hook has validated and completed the custom sprite swap.
+ * existing colour hook has validated the route and, for a loaded actor,
+ * completed the custom sprite swap. Unloaded town actors have no sprite yet;
+ * they can still route their shared preview/portrait cache immediately.
  * Busy animations and transient resource failures can therefore be retried.
  */
 static int late_actor_sprite(void *actor) {
   if (!runtime_enabled)
     return 0;
   void *sprite = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
-  if (!sprite)
-    return 0;
   ActorSprite *entry = actor_sprite_slot(actor, 0);
   if (entry)
     return entry->pending && entry->sprite == sprite;
@@ -1829,14 +1829,14 @@ static void change_colour(void *actor, int colour) {
   colour = skin_colour(actor, colour);
   const Route *route = find_route(actor, colour);
   void *old = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
-  if (late && (!route || !old)) {
+  if (late && !route) {
     apply_colour(actor, colour, NULL);
     return;
   }
   if (!route && runtime_enabled && runtime_actor(actor))
     return;
   if (!route || !old || sprite_matches(old, route)) {
-    if (late && route && old)
+    if (late && route)
       remember_actor_sprite(actor, old);
     apply_colour(actor, colour, route);
     return;

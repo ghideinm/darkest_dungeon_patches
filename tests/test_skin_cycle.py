@@ -102,8 +102,11 @@ class SkinCycleTest(unittest.TestCase):
                 (skin / "alpha_portrait_roster.png").write_bytes(origin.encode())
             command = self.compile_fixture(root, windows, "portrait_fixture.c")
             for failure in (0, 1, 2):
-                with self.subTest(windows=windows, failure=failure):
-                    self.run_fixture(command, root, (failure,), "PORTRAIT_SOURCES_OK")
+                for loaded_actor in (0, 1):
+                    with self.subTest(windows=windows, failure=failure, loaded_actor=loaded_actor):
+                        self.run_fixture(
+                            command, root, (failure, loaded_actor), "PORTRAIT_SOURCES_OK"
+                        )
 
     def test_linux_portraits_follow_skin_provider(self):
         self.run_portraits(False)

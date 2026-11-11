@@ -154,14 +154,14 @@ static void change_colour(void *actor, int colour) {
   colour = skin_colour(actor, colour);
   const Route *route = find_route(actor, colour);
   void *old = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
-  if (late && (!route || !old)) {
+  if (late && !route) {
     apply_colour(actor, colour, NULL);
     return;
   }
   if (!route && runtime_actor(actor))
     return;
   if (!route || !old || sprite_matches(old, route)) {
-    if (late && route && old)
+    if (late && route)
       remember_actor_sprite(actor, old);
     apply_colour(actor, colour, route);
     return;

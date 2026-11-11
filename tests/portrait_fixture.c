@@ -61,8 +61,17 @@ static void check_portraits(const Handle *handles, unsigned count) {
     assert(!strcmp(resource(NULL, handles + i), expected));
   }
 }
+static void portrait_colour(void *target, int colour) {
+  if (pointer_at(target, DD_ACTOR_SPRITE_OFFSET))
+    apply(target, colour);
+  else {
+    memcpy((char *)target + 0xb68, &colour, sizeof(colour));
+    ++applied;
+  }
+}
 int main(int argc, char **argv) {
-  assert(argc == 2);
+  assert(argc == 3);
+  int loaded_actor = atoi(argv[2]);
   char *args[] = {argv[0], "0", "0"};
   assert(!basic_skin_cycle_main(3, args)); /* Bind the native sprite APIs. */
   void *table[8] = {0};
@@ -98,8 +107,8 @@ int main(int argc, char **argv) {
 #endif
   int first = 0;
   memcpy(actor + 0xb68, &first, sizeof(first));
-  void *sprite = new_actor_sprite(NULL, 0, actor);
-  assert(sprite);
+  void *sprite = loaded_actor ? new_actor_sprite(NULL, 0, actor) : NULL;
+  assert(!loaded_actor || sprite);
   put_pointer(actor, DD_ACTOR_SPRITE_OFFSET, sprite);
   void *preview_sprite = make_sprite(klass, find_route(actor, 0));
   put_pointer(node, 0x60, preview_sprite);
@@ -111,6 +120,7 @@ int main(int argc, char **argv) {
   load_texture = portrait_load;
   resource_name = portrait_name;
   original_preview = preview;
+  original_colour = portrait_colour;
   /* Late loading: native cache already aliases all identical logical paths. */
   Handle before[2];
   memcpy(before, handles, sizeof(before));
@@ -126,6 +136,8 @@ int main(int argc, char **argv) {
   unsigned old_releases = portrait_releases;
   change_preview(klass, actor); /* Existing matching rig still repairs portraits. */
   check_portraits(handles, total);
+  assert(!native_actor_sprite(actor));
+  assert(loaded_actor || !pointer_at(actor, DD_ACTOR_SPRITE_OFFSET));
   assert(portrait_releases == old_releases + (unsigned)(atoi(argv[1]) ? total : 0));
   unsigned loaded = portrait_loads, released = portrait_releases;
   change_colour(actor, (int)total - 1);
