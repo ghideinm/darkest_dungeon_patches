@@ -42,6 +42,8 @@ def build(
         )
     windows = compile_binaries(root, windows_cc, windows_proxy)
     shutil.copyfile(HERE / "README.md", root / "README.md")
+    for name in ("cover.png", "preview_icon.png", "project.xml"):
+        shutil.copyfile(HERE / "workshop" / name, root / name)
     shutil.copyfile(
         HERE / "licenses/ultimate_asi_loader.txt", root / "ultimate_asi_loader_license.txt"
     )

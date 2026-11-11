@@ -1,17 +1,17 @@
 <?xml version='1.0' encoding='utf-8'?>
 <project>
-  <!-- 上传前将 ModDataPath 设为发布包 content 目录的 Windows 实际路径；不要指向整个仓库。 -->
+  <!-- 上传前将 ModDataPath 设为发布包解压目录的 Windows 实际路径；不要指向整个仓库。 -->
   <!-- PublishedFileId 对应现有工坊条目，后续更新时保留，避免重复创建。 -->
   <PreviewIconFile>preview_icon.png</PreviewIconFile>
-  <ItemDescriptionShort>32 MiB 资源读取、原生分辨率画布、按皮肤 Mod 来源动态加载骨架。需手动安装一次。</ItemDescriptionShort>
-  <ModDataPath>./content/</ModDataPath>
+  <ItemDescriptionShort>32 MiB 资源读取、原生分辨率画布、按皮肤 Mod 来源动态加载骨架。Windows 支持 DLL 加载器，Linux 使用预加载。</ItemDescriptionShort>
+  <ModDataPath>./</ModDataPath>
   <Title>暗黑地牢引擎补丁 | Darkest Dungeon Patches</Title>
   <Language>schinese</Language>
-  <UpdateDetails>v1.1.1：修复 Windows 工坊皮肤同名目录被合并的问题，按完整 Mod 来源保留独立皮肤；保留原版与竞技场 DLC 的皮肤条目。</UpdateDetails>
+  <UpdateDetails>v1.2.2：修复原生回退状态；兼容 DLL 加载器延迟加载后的画布重建；修复城镇未加载角色本体时的换肤，以及同名皮肤的头像来源串用。</UpdateDetails>
   <Visibility>public</Visibility>
   <UploadMode>direct_upload</UploadMode>
   <VersionMajor>1</VersionMajor>
-  <VersionMinor>1</VersionMinor>
+  <VersionMinor>2</VersionMinor>
   <TargetBuild>0</TargetBuild>
   <Tags>
     <Tags>Utilities</Tags>
@@ -27,13 +27,13 @@
 [b]这是引擎补丁，不包含封面中展示的皮肤资源。所需皮肤 Mod 请另外安装并启用。[/b]
 
 [h1]安装一次，以后正常启动[/h1]
-[b]仅订阅本条目或在存档中勾选它不会完成安装。请先按下面的方式安装补丁。[/b]
+[b]Windows 需先安装 DLL Mod Loader 或手动代理；Linux 需设置预加载。在存档中勾选本条目不会直接加载 DLL 或 SO。[/b]
 
 [h2]Windows x64[/h2]
 两种方式任选其一。详细步骤及配置项见随包 README.md。
 
 [b]方式一：DLL Mod Loader[/b]
-按照 [url=https://github.com/InuiDame/Darkest-Dungeon-DLL-Mod-Loader]Darkest Dungeon DLL Mod Loader[/url] 的说明安装加载器，将本补丁的 dd_engine_patch.dll 与 dd_engine_patch.ini 放在游戏根目录 mods/dd_engine_patch 中，在加载器配置工具里勾选 DLL 并保存。加载器也会扫描工坊 DLL，同一补丁只保留一份启用的副本。此方式无需本包的 winmm.dll 和 winmm.ini。
+按照 [url=https://github.com/InuiDame/Darkest-Dungeon-DLL-Mod-Loader]Darkest Dungeon DLL Mod Loader[/url] 的说明安装加载器，在其配置工具中勾选本工坊目录里的 dd_engine_patch.dll 并保存。也可将本补丁的 dd_engine_patch.dll 与 dd_engine_patch.ini 放在游戏根目录 mods/dd_engine_patch 中再启用；同一补丁只保留一份启用的副本。支持延迟加载后的画布重建、城镇人物与头像换肤。此方式无需本包的 winmm.dll 和 winmm.ini。
 
 [b]方式二：手动安装[/b]
 正常退出游戏，先从 manual_winmm.zip 解压出 winmm.dll 和 winmm.ini，再将它们与 dd_engine_patch.dll、dd_engine_patch.ini 一起复制到实际使用的 _windows/win64 或 _windowsnosteam/win64 中，与 Darkest.exe 同级。本包 winmm.ini 已包含 LoadExtraPlugins=dd_engine_patch.dll，之后直接从 Steam 或原 EXE 启动。使用方式一时不要解压此代理 ZIP。
@@ -52,11 +52,11 @@
 [b]Linux：[/b]正常退出游戏，恢复原来的 Steam 启动选项，移除本补丁的环境变量和两个 SO 路径，之后可删除这两个 SO。
 
 [h1]下载、源码与反馈[/h1]
-[url=https://github.com/ghideinm/darkest_dungeon_patches/releases/tag/v1.1.1]v1.1.1 发布包[/url]
+[url=https://github.com/ghideinm/darkest_dungeon_patches/releases/tag/v1.2.2]v1.2.2 发布包[/url]
 [url=https://space.bilibili.com/398692528][img]https://static.hdslb.com/images/favicon.png[/img][/url] [url=https://space.bilibili.com/398692528]作者 B站主页[/url]
 [url=https://github.com/ghideinm/darkest_dungeon_patches][img]https://github.githubassets.com/favicons/favicon.png[/img][/url] [url=https://github.com/ghideinm/darkest_dungeon_patches]GitHub 项目、源码与问题反馈[/url]
 
-实验版本。基础补丁已在 Linux 与 Windows 实机验证；本次 DLL 加载及配置改动已通过自造程序回归，仍需实机验证。游戏更新后会继续尝试按唯一特征定位，指令不兼容时跳过补丁。Windows 初始化检查失败时保留未修改的游戏代码。
+实验版本。本次 Linux 与 Windows 改动已通过自包含回归测试；Windows 的 DLL Mod Loader 0.2 延迟加载、画布重建及人物与头像换肤已实机验证。游戏更新后会继续尝试按唯一特征定位，指令不兼容时跳过补丁。Windows 初始化检查失败时保留未修改的游戏代码。
 
 本补丁并非 Red Hook Studios 的官方产品或官方修改，Red Hook Studios Inc. 不对使用本补丁产生的更改或损害负责。《Darkest Dungeon》及其标志为 Red Hook Studios Inc. 的商标，游戏内容版权归 Red Hook Studios Inc. 所有。</ItemDescription>
   <PublishedFileId>3834562187</PublishedFileId>

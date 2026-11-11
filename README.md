@@ -4,7 +4,7 @@
 
 《暗黑地牢》Steam 版引擎补丁：**可配置的资源读取缓冲（默认 32 MiB）、原生分辨率画布、按皮肤实际 Mod 来源加载骨架**。配置后直接从 Steam 启动，无需 Python 或编译器。
 
-**实验版本：基础补丁已在 Linux x86-64、Windows x64 实机验证；本次 DLL 加载与配置改动已通过自造程序回归，仍需实机验证。**
+**实验版本：本次 Linux x86-64、Windows x64 改动已通过自包含回归测试；Windows 的 DLL Mod Loader 0.2 延迟加载、画布重建及人物与头像换肤已实机验证。**
 
 从 [Releases](https://github.com/ghideinm/darkest_dungeon_patches/releases) 下载并解压 `darkest_dungeon_patches.zip`。补丁不包含皮肤资源，所需 Mod 请自行安装并启用。
 
