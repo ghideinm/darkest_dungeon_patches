@@ -71,6 +71,60 @@ static void check_native(void) {
   assert(key_count == keys_before);
   assert(int_at(actor, 0xb68) == 0);
 }
+static void late_preview(void *panel, void *target) {
+  assert(panel == klass && target == actor);
+  const Route *route = find_route(target, int_at(target, 0xb68));
+  assert(route && sprite_matches(pointer_at(preview_node, 0x60), route));
+  ++previews;
+}
+static void check_late_actor(int preview_first) {
+  clear_routes();
+  clear_catalogs();
+  failure = refuse_tracking = 0;
+  original_colour = apply;
+  original_override = textures;
+  original_preview = late_preview;
+  int colour = 0;
+  memcpy(actor + 0xb68, &colour, sizeof(colour));
+  void *sprite = create(&native_handles, 0);
+  put_pointer(actor, DD_ACTOR_SPRITE_OFFSET, sprite);
+#ifdef _WIN32
+  put_pointer(sprite, 0x50, callback_owner);
+#endif
+  put_pointer(preview_node, 0x60, create(&native_handles, 0));
+  assert(!actor_sprite_slot(actor, 0) && native_actor_sprite(actor));
+  if (preview_first)
+    change_preview(klass, actor);
+  else {
+    unsigned before = applied;
+    put_pointer(sprite, 0x38, manager_pointer);
+    change_colour(actor, 0);
+    assert(native_actor_sprite(actor) && applied == before);
+    assert(actor_sprite_slot(actor, 0)->pending);
+    assert(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET) == sprite);
+    put_pointer(sprite, 0x38, NULL);
+    failure = 2; /* A failed adoption retains its native sprite and can retry. */
+    change_colour(actor, 0);
+    assert(native_actor_sprite(actor) && applied == before);
+    assert(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET) == sprite);
+    failure = 0;
+    change_colour(actor, 0);
+  }
+  assert(!native_actor_sprite(actor));
+  assert(!actor_sprite_slot(actor, 0)->pending);
+  assert(int_at(actor, 0xb68) == 1); /* Official choices remain masked. */
+  assert(sprite_matches(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET),
+                        find_route(actor, 1)));
+#ifdef _WIN32
+  assert(pointer_at(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET), 0x50) ==
+         callback_owner);
+#endif
+  change_colour(actor, 2);
+  assert(int_at(actor, 0xb68) == 2);
+  change_preview(klass, actor);
+  free(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET));
+  free(pointer_at(preview_node, 0x60));
+}
 int main(int argc, char **argv) {
   assert(argc == 2);
   failure = atoi(argv[1]);
@@ -176,6 +230,10 @@ int main(int argc, char **argv) {
   assert(native_textures == 6);
   free(sprite);
   free(pointer_at(preview_node, 0x60));
+  clear_routes();
+  clear_catalogs();
+  check_late_actor(0);
+  check_late_actor(1);
   clear_routes();
   clear_catalogs();
   puts("NATIVE_FALLBACK_OK");

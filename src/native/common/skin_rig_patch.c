@@ -74,17 +74,19 @@ static void *grow_array(void *data, size_t *capacity, size_t count,
     *capacity = next;
   return grown;
 }
-/* Track successful custom constructions, so native fallback also governs all
- * later hooks. An untracked actor is native, including on allocation failure.
- * Match the sprite as well as the actor; constructors reset reused addresses.
+/* Explicit constructor fallbacks stay native across every later hook. Actors
+ * created before a delayed load may be adopted separately, once a safe swap is
+ * possible. A tracking allocation failure disables adoption of unknown actors:
+ * they might instead be constructor fallbacks that could not be recorded.
  */
 typedef struct ActorSprite {
   void *actor, *sprite;
-  int routed;
+  int routed, pending;
   struct ActorSprite *next;
 } ActorSprite;
 static ActorSprite *actor_sprites;
 #ifndef DD_PATCH_SELFTEST
+static int actor_tracking_failed;
 static ActorSprite *actor_sprite_slot(void *actor, int create) {
   for (ActorSprite *entry = actor_sprites; entry; entry = entry->next)
     if (entry->actor == actor)
@@ -96,11 +98,15 @@ static ActorSprite *actor_sprite_slot(void *actor, int create) {
     entry->actor = actor;
     entry->next = actor_sprites;
     actor_sprites = entry;
-  }
+  } else
+    actor_tracking_failed = 1;
   return entry;
 }
 #endif
 static void clear_routes(void) {
+#ifndef DD_PATCH_SELFTEST
+  actor_tracking_failed = 0;
+#endif
   while (actor_sprites) {
     ActorSprite *next = actor_sprites->next;
     free(actor_sprites);
@@ -409,6 +415,8 @@ static int same_hero(const Route *a, const Route *b) {
   return a && b && !strcmp(a->hero, b->hero);
 }
 static int same_group(const Route *a, const Route *b) {
+  if (!a || !b)
+    return 0;
   return same_hero(a, b) && !strcmp(a->group, b->group);
 }
 static const Route *route_for_name(const char *name, const Route *scope) {
@@ -1381,11 +1389,35 @@ static int native_actor_sprite(void *actor) {
   return !entry || !entry->routed ||
          entry->sprite != pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
 }
+/* A pending entry remains native for preview/fallback purposes until the
+ * existing colour hook has validated and completed the custom sprite swap.
+ * Busy animations and transient resource failures can therefore be retried.
+ */
+static int late_actor_sprite(void *actor) {
+  if (!runtime_enabled)
+    return 0;
+  void *sprite = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
+  if (!sprite)
+    return 0;
+  ActorSprite *entry = actor_sprite_slot(actor, 0);
+  if (entry)
+    return entry->pending && entry->sprite == sprite;
+  if (actor_tracking_failed)
+    return 0;
+  entry = actor_sprite_slot(actor, 1);
+  if (!entry)
+    return 0;
+  entry->pending = 1;
+  entry->sprite = sprite;
+  dprintf(2, "DD_RIG_ACTOR_ADOPT_PENDING actor=%p sprite=%p\n", actor, sprite);
+  return 1;
+}
 static void *construct_actor_sprite(const Handles *original, int flag,
                                     void *actor, const Route **route) {
   ActorSprite *entry = actor_sprite_slot(actor, 1);
   if (entry) {
     entry->routed = 0;
+    entry->pending = 0;
     entry->sprite = NULL;
   }
   *route = entry ? find_route(actor, int_at(actor, 0xb68)) : NULL;
@@ -1398,8 +1430,11 @@ static void *construct_actor_sprite(const Handles *original, int flag,
 }
 static void remember_actor_sprite(void *actor, void *sprite) {
   ActorSprite *entry = actor_sprite_slot(actor, 0);
-  if (entry)
+  if (entry) {
     entry->sprite = sprite;
+    entry->routed = 1;
+    entry->pending = 0;
+  }
 }
 static int sprite_matches(void *sprite, const Route *route) {
   if (!sprite)
@@ -1786,16 +1821,23 @@ static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
   return sprite;
 }
 static void change_colour(void *actor, int colour) {
-  if (native_actor_sprite(actor)) {
+  int late = late_actor_sprite(actor);
+  if (native_actor_sprite(actor) && !late) {
     apply_colour(actor, colour, NULL);
     return;
   }
   colour = skin_colour(actor, colour);
   const Route *route = find_route(actor, colour);
   void *old = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
+  if (late && (!route || !old)) {
+    apply_colour(actor, colour, NULL);
+    return;
+  }
   if (!route && runtime_enabled && runtime_actor(actor))
     return;
   if (!route || !old || sprite_matches(old, route)) {
+    if (late && route && old)
+      remember_actor_sprite(actor, old);
     apply_colour(actor, colour, route);
     return;
   }
@@ -1863,6 +1905,8 @@ static void **preview_sprite_slot(void *actor) {
   return NULL;
 }
 static void change_preview(void *panel, void *actor) {
+  if (late_actor_sprite(actor))
+    change_colour(actor, int_at(actor, 0xb68));
   int native = native_actor_sprite(actor);
   const Route *route = native ? NULL : find_route(actor, int_at(actor, 0xb68));
   if (!native && !route && runtime_enabled && runtime_actor(actor))

@@ -146,16 +146,23 @@ static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
   return sprite;
 }
 static void change_colour(void *actor, int colour) {
-  if (native_actor_sprite(actor)) {
+  int late = late_actor_sprite(actor);
+  if (native_actor_sprite(actor) && !late) {
     apply_colour(actor, colour, NULL);
     return;
   }
   colour = skin_colour(actor, colour);
   const Route *route = find_route(actor, colour);
   void *old = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
+  if (late && (!route || !old)) {
+    apply_colour(actor, colour, NULL);
+    return;
+  }
   if (!route && runtime_actor(actor))
     return;
   if (!route || !old || sprite_matches(old, route)) {
+    if (late && route && old)
+      remember_actor_sprite(actor, old);
     apply_colour(actor, colour, route);
     return;
   }
@@ -217,6 +224,8 @@ static void **preview_sprite_slot(void *actor) {
   return NULL;
 }
 static void change_preview(void *panel, void *actor) {
+  if (late_actor_sprite(actor))
+    change_colour(actor, int_at(actor, 0xb68));
   int native = native_actor_sprite(actor);
   const Route *route = native ? NULL : find_route(actor, int_at(actor, 0xb68));
   if (!native && !route && runtime_actor(actor))
