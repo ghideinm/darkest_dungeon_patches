@@ -333,6 +333,7 @@ static int windows_rig_plan(DdWindowsPatches *plan, unsigned char **allocated) {
   alternate_root = windows_alternate_root;
   full_path = windows_full_path;
   load_spine = (void *)(native_address(DD_LOAD_SPINE));
+  load_texture = (void *)(native_address(DD_LOAD_TEXTURE));
   release_spine = windows_release_spine;
   get_resource = (void *)(native_address(DD_GET_RESOURCE));
   unsigned char *stubs = windows_near_page();

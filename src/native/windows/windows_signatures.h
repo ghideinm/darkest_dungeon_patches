@@ -4,6 +4,14 @@
 /* Unique code features; wildcard relocations and explicitly extracted fields.
  */
 static const DdSignature dd_signatures[] = {
+    {"load_texture",
+     "40 53 55 56 57 41 56 48 83 ec 60 48 8b 05 ?? ?? ?? ?? 48 33 c4 48 89 44 "
+     "24 58 48 8b fa 48 8b f1",
+     DD_LOAD_TEXTURE, 4, 0, 0, 0, 1},
+    {"portrait_layout",
+     "48 8b 18 48 8d 4b 28 48 8d 45 90 48 3b c8 74 ?? 48 8b 55 90 4c 8b 45 98 "
+     "4c 2b c2 49 c1 f8 04 e8 ?? ?? ?? ??",
+     DD_PORTRAIT_LAYOUT, 4, 0, 0, 0, 1},
     {"resource_0",
      "b9 ?? ?? ?? ?? ff 15 ?? ?? ?? ?? 48 89 44 de 20 48 8d 56 20 48 8d 14 da "
      "48 8d 8e 80 00 00 00 e8 ?? ?? ?? ?? 48 ff c3 48 83 fb 0c 75 ??",

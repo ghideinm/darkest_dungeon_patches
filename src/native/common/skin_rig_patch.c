@@ -523,6 +523,7 @@ static bool (*full_path)(void *, int, const char *, char *, unsigned);
 /* C++ nontrivial Handle return uses an explicit sret pointer on this ABI. */
 static void (*load_spine)(Handle *, const char *, int, const void *);
 static void (*release_spine)(Handle *);
+static void (*load_texture)(Handle *, const char *, unsigned);
 static void *(*get_resource)(void *, const Handle *);
 static _Thread_local const Route *override_route;
 
@@ -1477,13 +1478,80 @@ static void override_textures(void *sprite, const char *directory) {
             normalized);
   original_override(sprite, normalized);
 }
+static void **preview_sprite_slot(void *actor);
+/* Native campaign assets cache roster portraits by colour index. Two providers
+ * may publish exactly the same logical path, so resolving that path globally
+ * loses the selected provider even after the actor's rig has been corrected.
+ * Repair every catalogue slot, including an already populated late-load cache,
+ * and transfer the new native Handle's reference to the native owning vector.
+ */
+static void sync_portraits(void *actor) {
+  if (!runtime_enabled || !load_texture)
+    return;
+  void **slot = preview_sprite_slot(actor);
+  const SkinCatalog *catalog = slot ? source_catalog(actor_class(actor)) : NULL;
+  if (!catalog)
+    return;
+  const Handles *view = (const void *)((const char *)slot - 0x38);
+  uintptr_t begin = (uintptr_t)view->begin, end = (uintptr_t)view->end;
+  uintptr_t capacity = (uintptr_t)view->capacity;
+  if (!begin || end < begin || capacity < end ||
+      (end - begin) % sizeof(Handle) ||
+      (end - begin) / sizeof(Handle) != catalog->count ||
+      (capacity - begin) % sizeof(Handle))
+    return;
+  void *manager = *(void **)(native_address(DD_RESOURCE));
+  if (!manager)
+    return;
+  for (size_t i = 0; i < catalog->count; ++i) {
+    const SkinSource *source = catalog->entries + i;
+    if (!*source->origin)
+      continue;
+    const char *hero = source->skin + strlen("heroes/");
+    const char *separator = strchr(hero, '/');
+    char request[512], actual[512], key[256];
+    int length =
+        separator
+            ? snprintf(request, sizeof(request), "%s/%.*s_portrait_roster.png",
+                       source->skin, (int)(separator - hero), hero)
+            : -1;
+    if (length < 0 || (size_t)length >= sizeof(request) ||
+        pinned_texture(actual, source->origin, request) != 1)
+      continue;
+    length = snprintf(key, sizeof(key), ">%s", actual);
+    if (length < 0 || (size_t)length >= sizeof(key))
+      continue;
+    Handle *target = view->begin + i;
+    const char *name = resource_name(manager, target);
+    if (name && !strcmp(name, key))
+      continue;
+    Handle loaded = {0, -1, NULL};
+    load_texture(&loaded, key, 0);
+    name = resource_name(manager, &loaded);
+    if (!name || strcmp(name, key)) {
+      release_spine(&loaded);
+      dprintf(2, "DD_RIG_PORTRAIT_REFUSED index=%zu source=%s\n", i,
+              source->origin);
+      continue;
+    }
+    Handle previous = *target;
+    *target = loaded;
+    release_spine(&previous);
+    dprintf(2, "DD_RIG_PORTRAIT_ROUTED index=%zu skin=%s source=%s\n", i,
+            source->skin, source->origin);
+  }
+}
 static void apply_colour(void *actor, int colour, const Route *route) {
   const Route *previous = override_route;
   override_route = route;
   original_colour(actor, colour);
   override_route = previous;
+  if (route)
+    sync_portraits(actor);
 }
 static void apply_preview(void *panel, void *actor, const Route *route) {
+  if (route)
+    sync_portraits(actor);
   const Route *previous = override_route;
   override_route = route;
   original_preview(panel, actor);
@@ -1956,6 +2024,7 @@ __attribute__((constructor)) static void init(void) {
   match_archive = (void *)(native_address(DD_MATCH_ARCHIVE));
   full_path = (void *)(native_address(DD_FULL_PATH));
   load_spine = (void *)(native_address(DD_LOAD_SPINE));
+  load_texture = (void *)(native_address(DD_LOAD_TEXTURE));
   release_spine = (void *)(native_address(DD_RELEASE_SPINE));
   get_resource = (void *)(native_address(DD_GET_RESOURCE));
   if (mprotect(stubs, 4096, PROT_READ | PROT_EXEC)) {
