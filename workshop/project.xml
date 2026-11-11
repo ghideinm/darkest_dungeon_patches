@@ -32,13 +32,25 @@
 [h2]Windows x64[/h2]
 两种方式任选其一。详细步骤及配置项见随包 README.md。
 
-[b]方式一：DLL Mod Loader[/b]
-按照 [url=https://github.com/InuiDame/Darkest-Dungeon-DLL-Mod-Loader]Darkest Dungeon DLL Mod Loader[/url] 的说明安装加载器，在其配置工具中勾选本工坊目录里的 dd_engine_patch.dll 并保存。也可将本补丁的 dd_engine_patch.dll 与 dd_engine_patch.ini 放在游戏根目录 mods/dd_engine_patch 中再启用；同一补丁只保留一份启用的副本。支持延迟加载后的画布重建、城镇人物与头像换肤。此方式无需本包的 winmm.dll 和 winmm.ini。
+[b]从旧版 Windows 补丁迁移：先卸载旧加载方式[/b]
+1. 正常退出游戏。打开游戏安装目录，检查以前安装过补丁的 _windows/win64 和 _windowsnosteam/win64（Darkest.exe 所在目录）。
+2. 将其中旧的 dd_engine_patch.dll、dd_engine_patch.asi 移出游戏、mods 和工坊目录，避免再次被扫描加载。保留自己修改过的 dd_engine_patch.ini，迁移后可放到新版 DLL 同级继续使用。
+3. 如果 winmm.dll、winmm.ini 是以前仅为本补丁放入的，一并移出上述 EXE 目录。若其他 Mod 共用这个代理，则保留代理和配置，只移除 winmm.ini 的 LoadExtraPlugins 中指向本补丁 DLL／ASI 的项目，保留其他项目；旧 dd_engine_patch.asi 也要移出，避免被自动加载。
+4. 若用过更早的自有 Steam 启动器，先撤销该启动器为本补丁设置的 Steam 启动选项，恢复原有启动设置，再移除旧启动器。仅取消工坊订阅不会删除以前手动复制的文件。
+
+[b]方式一：使用 Darkest Dungeon DLL Mod Loader（本次已验证 0.2 版）[/b]
+1. 从 [url=https://github.com/InuiDame/Darkest-Dungeon-DLL-Mod-Loader/releases/tag/0.2]加载器 0.2 发布页[/url] 下载 DDModLoader_Setup.exe，运行安装程序。确认目标是游戏根目录（包含 _windows 或 _windowsnosteam 的目录），而非 win64 或工坊目录。
+2. 订阅或更新本条目，在 Steam 安装目录的 steamapps/workshop/content/262060 中找到本条目对应的编号目录，确认其中有 dd_engine_patch.dll 和 dd_engine_patch.ini。也可从发布包取出这两个文件，放到游戏根目录 mods/dd_engine_patch 中；选择一种位置即可。
+3. 打开游戏根目录的 DDModLoaderGUI.exe，或桌面的加载器配置工具快捷方式。若未识别游戏，点击“选择游戏目录”指定上述根目录，再刷新列表。
+4. 按完整路径找到本补丁的 dd_engine_patch.dll，勾选后点击“保存”。若 mods 与工坊中都有副本，只启用其中一份。保留的自定义 dd_engine_patch.ini 应与这份 DLL 放在同一目录。
+5. 点击“从 Steam 启动”，或直接从 Steam 正常启动游戏。加载器会随游戏自动加载补丁，配置保存后无需每次单独打开配置工具。支持延迟加载后的画布重建、城镇人物与小头像换肤；修改补丁配置后需重启游戏。
+
+manual_winmm.zip 供下面的手动方式使用。改用 DLL Mod Loader 时，旧 WinMM 路线应按上面的迁移步骤停用，保证本补丁只加载一次。新加载器安装的 dbghelp.dll 属于其自动加载入口，迁移时保留。
 
 [b]方式二：手动安装[/b]
 正常退出游戏，先从 manual_winmm.zip 解压出 winmm.dll 和 winmm.ini，再将它们与 dd_engine_patch.dll、dd_engine_patch.ini 一起复制到实际使用的 _windows/win64 或 _windowsnosteam/win64 中，与 Darkest.exe 同级。本包 winmm.ini 已包含 LoadExtraPlugins=dd_engine_patch.dll，之后直接从 Steam 或原 EXE 启动。使用方式一时不要解压此代理 ZIP。
 
-本项目不再提供安装或启动 EXE；已有其他 Mod 的 winmm.dll 时不要直接覆盖。旧版 dd_engine_patch.asi 需要移除，避免重复加载。更早的自有 Steam 启动器需要恢复当时的 Steam 启动参数后再移除。
+本项目不再提供安装或启动 EXE；已有其他 Mod 的 winmm.dll 时不要直接覆盖。旧版文件的清理及启动选项恢复见上面的迁移步骤。
 
 [h2]Linux x86-64[/h2]
 1. 使用原生 Linux 游戏，关闭强制 Proton。
@@ -48,7 +60,7 @@
 手动复制的补丁需要自行卸载；取消订阅不会删除这些副本。更新时退出游戏，替换所选方式下的 DLL 或 SO，保留自行修改的 dd_engine_patch.ini。
 
 [h1]卸载[/h1]
-[b]Windows：[/b]正常退出游戏。方式一在加载器中禁用本补丁，或删除手动放入 mods/dd_engine_patch 的 DLL 与 INI。方式二删除安装的 dd_engine_patch.dll、dd_engine_patch.ini，以及只供本补丁使用的 winmm.dll、winmm.ini；共用代理时保留代理，只移除 LoadExtraPlugins 中的本补丁条目。
+[b]Windows：[/b]正常退出游戏。DLL Mod Loader 方式在配置工具里取消勾选本补丁的 DLL 并保存；手动放入 mods/dd_engine_patch 的文件可在保留自定义 INI 后移出扫描目录。旧 WinMM／ASI 手动方式按上面的“先卸载旧加载方式”步骤清理；共用代理时保留其他 Mod 的文件和配置。加载器本身及其他 DLL Mod 可以继续使用。
 [b]Linux：[/b]正常退出游戏，恢复原来的 Steam 启动选项，移除本补丁的环境变量和两个 SO 路径，之后可删除这两个 SO。
 
 [h1]下载、源码与反馈[/h1]
