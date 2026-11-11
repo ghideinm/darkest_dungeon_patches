@@ -305,6 +305,7 @@ static int windows_guard_sites(const DdWindowsImage *image,
   }
   return 1;
 }
+#include "windows_render.h"
 #include "windows_resource.h"
 static int windows_rig_plan(DdWindowsPatches *plan, unsigned char **allocated) {
   runtime_enabled = 1;
@@ -433,6 +434,8 @@ static void windows_initialize_patch(void) {
     goto rollback;
   if ((groups & DD_GROUP_RESOURCE) &&
       !windows_resource_plan(&plan, &resource_stubs))
+    goto rollback;
+  if ((groups & DD_GROUP_RENDER) && !windows_render_plan(&plan))
     goto rollback;
   if (groups & DD_GROUP_RENDER)
     for (size_t i = 0; i < sizeof(windows_render_sites) / sizeof(WindowsSite);

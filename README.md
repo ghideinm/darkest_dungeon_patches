@@ -107,6 +107,8 @@ log_file=dd_engine_patch.log
 
 - `resource_buffer_mib`：每个资源读取缓冲的大小，单位 MiB，使用系统内存，允许 16–2047；分配大小与读取检查同步修改。
 - Windows 加载器延迟注入时，已创建的缓冲在取出空闲池、提交读取之前按需扩容。扩容失败则保留原缓冲，并按实际容量读取，避免读取上限超过已分配内存。
+- Windows 延迟加载时，补丁在呈现后的渲染线程安全帧重建已存在的 `main`、`gui`、`gui_utility` 画布，保持原生宽高比和 UI 逻辑坐标。所有新资源成功创建后才替换；失败保留原画布，同一尺寸不反复分配。初始化完成后不持续追踪窗口尺寸变化。
+- 画布诊断中，`DD_NATIVE_CANVAS_PENDING` 表示等待图形上下文或安全帧，`DD_NATIVE_CANVAS_READY` 表示画布已就绪（`rebuilt=1` 表示进行了延迟重建），`DD_NATIVE_CANVAS_REBUILD_FAILED` 表示保留旧画布。`DD_PATCH_APPLIED` 仅表示指令补丁安装成功。
 - `cache_initial_capacity`：皮肤方案、职业目录缓存各自的初始条目数，之后自动翻倍扩容。
 - `hide_vanilla_skins`：默认 `1`，有 Mod 皮肤时跳过同职业的原版及官方 DLC 皮肤；设为 `0` 关闭。更新时已有配置中明确填写的 `0` 会保留。
 - `log_to_file`：默认 `0`；`1` 同时将补丁诊断追加到文件，并及时刷新。

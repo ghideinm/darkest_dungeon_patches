@@ -42,6 +42,29 @@ static const DdSignature dd_signatures[] = {
     {"render_6",
      "45 0f 43 f7 43 8d 0c f6 03 c9 b8 ab aa aa aa f7 e1 44 8b fa 41 d1 ef 41",
      DD_RENDER_6, 2, 0, 0, 0, 1},
+    {"render_registry",
+     "ba 38 04 00 00 b9 80 07 00 00 e8 ?? ?? ?? ?? 4c 8b f8 4c 8b 25 ?? ?? ?? "
+     "?? c6 45 20 00",
+     DD_RENDER_REGISTRY, 2, 21, 1, 0, 2},
+    {"render_bound_target",
+     "48 89 5c 24 18 48 89 74 24 20 57 48 83 ec 40 48 39 15 ?? ?? ?? ?? 41 0f "
+     "b6 f0 0f 29 74 24 30 48 8b da 48 8b f9 74 ?? b9 a9 8c 00 00 48 85 d2",
+     DD_RENDER_BOUND_TARGET, 2, 18, 1, 0, 2},
+    {"render_swap",
+     "48 8b 0d ?? ?? ?? ?? ff 15 ?? ?? ?? ?? 48 8b 15 ?? ?? ?? ?? 89 2d ?? ?? "
+     "?? ?? 48 8d 4a 08 89 6a 58 48 89 0a",
+     DD_RENDER_SWAP, 2, 9, 1, 0, 4},
+    {"render_window",
+     "48 8b 0d ?? ?? ?? ?? ff 15 ?? ?? ?? ?? 48 8b 15 ?? ?? ?? ?? 89 2d ?? ?? "
+     "?? ?? 48 8d 4a 08 89 6a 58 48 89 0a",
+     DD_RENDER_WINDOW, 2, 3, 1, 0, 2},
+    {"render_target_layout",
+     "48 89 5c 24 18 55 56 57 41 56 41 57 48 83 ec 60 48 8b 05 ?? ?? ?? ?? 48 "
+     "33 c4 48 89 44 24 58 8b f1 41 0f b6 d8 b9 14 00 00 00 8b ea e8 ?? ?? ?? "
+     "?? 48 8d 54 24 50 b9 a6 8c 00 00 48 8b f8 89 70 0c 89 68 10 ff 15 ?? ?? "
+     "?? ?? 48 8b d7 b9 01 00 00 00 ff 15 ?? ?? ?? ?? 48 8d 57 04 b9 01 00 00 "
+     "00 ff 15 ?? ?? ?? ?? 48 8d 57 08 b9 01 00 00 00",
+     DD_RENDER_TARGET_LAYOUT, 2, 0, 0, 0, 1},
     {"hook_new",
      "e8 ?? ?? ?? ?? 48 89 83 ?? ?? ?? ?? 8b 93 68 0b 00 00 85 d2 78 ?? 48 8b",
      DD_HOOK_NEW, 4, 0, 0, 0, 1},

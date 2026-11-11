@@ -245,7 +245,13 @@ int main(void) {
 #include <stdlib.h>
 #include <string.h>
 static HMODULE loaded_plugin;
+static unsigned swaps;
+__declspec(dllexport) void SDL_GL_SwapWindow(void *window) {(void)window;++swaps;}
+__declspec(dllexport) void SDL_GL_GetDrawableSize(void *window,int *w,int *h) {(void)window;*w=3840;*h=2160;}
+__declspec(dllexport) void *SDL_GL_GetCurrentContext(void) {return NULL;}
+__declspec(dllexport) void *SDL_GL_GetProcAddress(const char *name) {(void)name;return NULL;}
 static DWORD WINAPI load_plugin(void *path) {
+ Sleep(1500);
  loaded_plugin=LoadLibraryW(path);return loaded_plugin ? 0 : 1;
 }
 static DWORD WINAPI worker(void *unused) {(void)unused;return timeGetTime() ? 0 : 1;}
@@ -265,13 +271,22 @@ int wmain(void) {
  const unsigned char *image=(const void*)GetModuleHandleW(NULL);
  int original=GetEnvironmentVariableW(L"DD_EXPECT_ORIGINAL",NULL,0)!=0;
  if(!ready || *ready!=(original?0:1))return 11;
+ void (*swap_hook)(void*)=*(void (**)(void*))(image+DD_SWAP_RVA);
+ int no_render=GetEnvironmentVariableW(L"DD_EXPECT_NO_RENDER",NULL,0)!=0;
+ int unsupported=GetEnvironmentVariableW(L"DD_EXPECT_UNSUPPORTED_SWAP",NULL,0)!=0;
+ if(unsupported) {
+   if((uintptr_t)swap_hook!=(uintptr_t)SDL_GL_SwapWindow+1)return 25;
+ } else {
+   if((swap_hook==SDL_GL_SwapWindow)!=(original||no_render))return 23;
+   swap_hook(NULL);if(swaps!=1)return 24;
+ }
  uint32_t expected=original?DD_EXPECT_CAP:
    GetEnvironmentVariableW(L"DD_EXPECT_CONFIGURED",NULL,0)?0x4000000:0x2000000;
  uint32_t cap;memcpy(&cap,image+DD_RESOURCE_RVA,4);if(cap!=expected)return 12;
  if(image[DD_RESOURCE_RVA_1]!=(original?0xc7:0xe9))return 21;
  if(image[DD_RESOURCE_RVA_2]!=(original?0xc7:0x8b))return 22;
  if(image[DD_COLOUR_RVA]!=(original?0x48:0xe9))return 13;
- if(image[DD_RENDER_RVA]!=(original?0xbf:0x90))return 14;
+ if(image[DD_RENDER_RVA]!=((original||no_render)?0xbf:0x90))return 14;
  if(image[DD_PALETTE_RVA]!=(original?0x48:0xe9))return 18;
  MEMORY_BASIC_INFORMATION info;
  if(!VirtualQuery(image+DD_RESOURCE_RVA,&info,sizeof(info)) || info.Protect!=PAGE_EXECUTE_READ)return 15;
@@ -289,6 +304,7 @@ int wmain(void) {
                 f"-DDD_RESOURCE_RVA_2={fixture.symbols['RESOURCE_2']}",
                 f"-DDD_COLOUR_RVA={fixture.symbols['HOOK_COLOUR']}",
                 f"-DDD_RENDER_RVA={fixture.symbols['RENDER_0']}",
+                f"-DDD_SWAP_RVA={fixture.symbols['RENDER_SWAP']}",
                 f"-DDD_PALETTE_RVA={fixture.symbols['FULL_PATH']}",
             ]
             binary = root / "fixture.exe"
@@ -301,6 +317,7 @@ int wmain(void) {
                     str(child),
                     "-lwinmm",
                     "-Wl,--file-alignment,4096",
+                    "-Wl,--disable-dynamicbase",
                     "-o",
                     str(binary),
                 ],
@@ -318,6 +335,30 @@ int wmain(void) {
                     if address <= rva < address + max(size, raw_size):
                         return position + rva - address
                 raise AssertionError("Import RVA outside fixture sections")
+
+            # Populate our synthetic swap import with this executable's own
+            # exported SDL stand-in. No SDL/game installation is needed.
+            exports = file_offset(struct.unpack_from("<I", data, pe + 136)[0])
+            name_count = struct.unpack_from("<I", data, exports + 24)[0]
+            functions, names, ordinals = struct.unpack_from("<III", data, exports + 28)
+            for index in range(name_count):
+                name = struct.unpack_from("<I", data, file_offset(names) + index * 4)[0]
+                start = file_offset(name)
+                if data[start : data.index(0, start)] == b"SDL_GL_SwapWindow":
+                    ordinal = struct.unpack_from("<H", data, file_offset(ordinals) + index * 2)[0]
+                    function = struct.unpack_from("<I", data, file_offset(functions) + ordinal * 4)[
+                        0
+                    ]
+                    image_base = struct.unpack_from("<Q", data, pe + 48)[0]
+                    struct.pack_into(
+                        "<Q",
+                        fixture.data,
+                        fixture.symbols["RENDER_SWAP"] - fixture.data_address,
+                        image_base + function,
+                    )
+                    break
+            else:
+                raise AssertionError("Missing own swap export")
 
             # Point the synthetic allocator feature at this own executable's
             # real UCRT import, so DLL and early WinMM loading use the same heap.
@@ -379,6 +420,8 @@ int wmain(void) {
                 "DD_EXPECT_ORIGINAL",
                 "DD_EXPECT_CONFIGURED",
                 "DD_FIXTURE_DLL_PATH",
+                "DD_EXPECT_NO_RENDER",
+                "DD_EXPECT_UNSUPPORTED_SWAP",
             ):
                 environment.pop(key, None)
             modes = ["dll"]
@@ -399,7 +442,15 @@ int wmain(void) {
                 )
                 if mode == "dll":
                     mode_environment["DD_FIXTURE_DLL_PATH"] = str(library)
-                for case in ("matching", "configured", "signature", "guard", "rollback"):
+                for case in (
+                    "matching",
+                    "configured",
+                    "signature",
+                    "guard",
+                    "rollback",
+                    "render_disabled",
+                    "swap_guard",
+                ):
                     with self.subTest(mode=mode, case=case):
                         configuration = module_dir / "dd_engine_patch.ini"
                         log = module_dir / "dd_engine_patch.log"
@@ -411,6 +462,16 @@ int wmain(void) {
                                 "[logging]\nlog_to_file=1\n"
                             )
                         candidate = bytearray(data)
+                        case_environment = dict(mode_environment)
+                        if case == "render_disabled":
+                            case_environment.update(DD_NATIVE_RENDER="0", DD_EXPECT_NO_RENDER="1")
+                        if case == "swap_guard":
+                            position = raw + ((len(fixture.code) + 4095) & ~4095)
+                            position += fixture.symbols["RENDER_SWAP"] - fixture.data_address
+                            value = struct.unpack_from("<Q", candidate, position)[0]
+                            struct.pack_into("<Q", candidate, position, value + 1)
+                            case_environment["DD_EXPECT_UNSUPPORTED_SWAP"] = "1"
+                        fixture.header.write_text(text)
                         if case == "signature":
                             candidate[
                                 raw + fixture.symbols["RESOURCE_0"] - fixture.code_address + 5
@@ -456,11 +517,11 @@ static BOOL fault_protect(void *address,SIZE_T length,DWORD protect,DWORD *previ
                             [runner, str(binary)],
                             cwd=root,
                             env=(
-                                dict(mode_environment, DD_EXPECT_CONFIGURED="1")
+                                dict(case_environment, DD_EXPECT_CONFIGURED="1")
                                 if case == "configured"
-                                else mode_environment
-                                if case == "matching"
-                                else dict(mode_environment, DD_EXPECT_ORIGINAL="1")
+                                else case_environment
+                                if case in ("matching", "render_disabled")
+                                else dict(case_environment, DD_EXPECT_ORIGINAL="1")
                             ),
                             capture_output=True,
                             text=True,
