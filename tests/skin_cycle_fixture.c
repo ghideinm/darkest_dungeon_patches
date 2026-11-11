@@ -250,7 +250,7 @@ int main(int argc, char **argv) {
   memcpy(actor + 0xb68, &first, sizeof(first));
   const Route *initial = find_route(actor, first);
   assert(initial);
-  put_pointer(actor, DD_ACTOR_SPRITE_OFFSET, make_sprite(klass, initial));
+  put_pointer(actor, DD_ACTOR_SPRITE_OFFSET, new_actor_sprite(NULL, 0, actor));
 #ifdef _WIN32
   put_pointer(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET), 0x50, callback_owner);
 #endif

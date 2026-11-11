@@ -69,6 +69,26 @@ class SkinCycleTest(unittest.TestCase):
                     with self.subTest(windows=windows, official=official, hide=hide):
                         self.run_fixture(command, root, (official, hide), "SKIN_CYCLE_OK")
 
+    def run_native_fallback(self, windows):
+        with tempfile.TemporaryDirectory(prefix="dd-native-fallback-") as directory:
+            root = Path(directory)
+            for origin, suffix in [("", "Z")] + [("mods/one", c) for c in "ABC"]:
+                anim = root / origin / f"heroes/alpha/alpha_{suffix}/anim"
+                anim.mkdir(parents=True)
+                (anim / "idle.png").write_bytes(b"synthetic texture")
+                (anim / "alpha.sprite.idle.skel").write_bytes(b"synthetic skeleton")
+                (anim / "alpha.sprite.idle.atlas").write_text("idle.png\nsize: 8,8\n")
+            command = self.compile_fixture(root, windows, "native_fallback_fixture.c")
+            for failure in (1, 2, 3, 4):
+                with self.subTest(windows=windows, failure=failure):
+                    self.run_fixture(command, root, (failure,), "NATIVE_FALLBACK_OK")
+
+    def test_linux_native_fallback_colour_and_preview(self):
+        self.run_native_fallback(False)
+
+    def test_windows_native_fallback_colour_and_preview(self):
+        self.run_native_fallback(True)
+
     def run_class_fallback(self, windows):
         with tempfile.TemporaryDirectory(prefix="dd-class-fallback-") as directory:
             root = Path(directory)

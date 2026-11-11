@@ -74,7 +74,38 @@ static void *grow_array(void *data, size_t *capacity, size_t count,
     *capacity = next;
   return grown;
 }
+/* Track successful custom constructions, so native fallback also governs all
+ * later hooks. An untracked actor is native, including on allocation failure.
+ * Match the sprite as well as the actor; constructors reset reused addresses.
+ */
+typedef struct ActorSprite {
+  void *actor, *sprite;
+  int routed;
+  struct ActorSprite *next;
+} ActorSprite;
+static ActorSprite *actor_sprites;
+#ifndef DD_PATCH_SELFTEST
+static ActorSprite *actor_sprite_slot(void *actor, int create) {
+  for (ActorSprite *entry = actor_sprites; entry; entry = entry->next)
+    if (entry->actor == actor)
+      return entry;
+  if (!create)
+    return NULL;
+  ActorSprite *entry = calloc(1, sizeof(*entry));
+  if (entry) {
+    entry->actor = actor;
+    entry->next = actor_sprites;
+    actor_sprites = entry;
+  }
+  return entry;
+}
+#endif
 static void clear_routes(void) {
+  while (actor_sprites) {
+    ActorSprite *next = actor_sprites->next;
+    free(actor_sprites);
+    actor_sprites = next;
+  }
   for (size_t i = 0; i < route_count; ++i) {
     if (routes[i]->plan) {
       free(routes[i]->plan->entries);
@@ -1342,6 +1373,33 @@ static void *create_actor_sprite(const Handles *original, int flag, void *klass,
   *route = NULL;
   return native_new(original, flag);
 }
+static int native_actor_sprite(void *actor) {
+  if (!runtime_enabled)
+    return 0;
+  const ActorSprite *entry = actor_sprite_slot(actor, 0);
+  return !entry || !entry->routed ||
+         entry->sprite != pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
+}
+static void *construct_actor_sprite(const Handles *original, int flag,
+                                    void *actor, const Route **route) {
+  ActorSprite *entry = actor_sprite_slot(actor, 1);
+  if (entry) {
+    entry->routed = 0;
+    entry->sprite = NULL;
+  }
+  *route = entry ? find_route(actor, int_at(actor, 0xb68)) : NULL;
+  void *sprite = create_actor_sprite(original, flag, actor_class(actor), route);
+  if (entry) {
+    entry->sprite = sprite;
+    entry->routed = sprite && *route;
+  }
+  return sprite;
+}
+static void remember_actor_sprite(void *actor, void *sprite) {
+  ActorSprite *entry = actor_sprite_slot(actor, 0);
+  if (entry)
+    entry->sprite = sprite;
+}
 static int sprite_matches(void *sprite, const Route *route) {
   if (!sprite)
     return 0;
@@ -1430,6 +1488,33 @@ static void apply_preview(void *panel, void *actor, const Route *route) {
   override_route = route;
   original_preview(panel, actor);
   override_route = previous;
+}
+static void discard_sprite(void *sprite);
+/* The class preview cache is shared between actors. If it last held a custom
+ * sprite, restore the class's native handles before previewing a native actor.
+ */
+static int restore_native_preview(void **slot, void *klass) {
+  ActorSprite *entry = actor_sprite_slot(slot, 0);
+  if (!entry || !entry->routed || entry->sprite != *slot)
+    return 1;
+  const Handles *handles = (const void *)((const char *)klass + 0xe0);
+  void *sprite = native_new(handles, 0);
+  if (!sprite)
+    return 0;
+  void *old = *slot;
+  *slot = sprite;
+  entry->routed = 0;
+  entry->sprite = sprite;
+  discard_sprite(old);
+  return 2;
+}
+static int remember_custom_preview(void **slot, void *sprite) {
+  ActorSprite *entry = actor_sprite_slot(slot, 1);
+  if (!entry)
+    return 0;
+  entry->routed = 1;
+  entry->sprite = sprite;
+  return 1;
 }
 #ifdef DD_RIG_RUNTIME_TEST
 /* Offline adapter: exercise discovery and native ownership calls with fake
@@ -1534,6 +1619,13 @@ void dd_runtime_test_bind_colour(void (*apply)(void *, int)) {
   native_symbols.values[DD_ACTOR_SPRITE_FIELD] = 0x100;
 }
 void dd_runtime_test_change_colour(void *actor, int colour) {
+  /* This adapter tests colour selection without constructing a physical sprite.
+   */
+  ActorSprite *entry = actor_sprite_slot(actor, 1);
+  if (entry) {
+    entry->sprite = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
+    entry->routed = 1;
+  }
   change_colour(actor, colour);
 }
 const char *dd_runtime_test_actor_skin(void *actor, int colour) {
@@ -1614,9 +1706,9 @@ static void native_two_sprite_test(void *klass, const Route *scope) {
     discard_sprite(right);
 }
 static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
-  const Route *route = find_route(actor, int_at(actor, 0xb68));
+  const Route *route;
   void *klass = actor_class(actor);
-  void *sprite = create_actor_sprite(original, flag, klass, &route);
+  void *sprite = construct_actor_sprite(original, flag, actor, &route);
   if (!route)
     return sprite;
   dprintf(2, "DD_RIG_ACTOR_INIT actor=%p sprite=%p skin=%s group=%s\n", actor,
@@ -1626,6 +1718,10 @@ static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
   return sprite;
 }
 static void change_colour(void *actor, int colour) {
+  if (native_actor_sprite(actor)) {
+    apply_colour(actor, colour, NULL);
+    return;
+  }
   colour = skin_colour(actor, colour);
   const Route *route = find_route(actor, colour);
   void *old = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
@@ -1667,6 +1763,7 @@ static void change_colour(void *actor, int colour) {
   }
   void (*set_sprite)(void *, void *) = (void *)(native_address(DD_SET_SPRITE));
   set_sprite(actor, sprite);
+  remember_actor_sprite(actor, sprite);
   /* Exactly the same captured-Hero step callback constructed by
    * Hero::LoadAssetsInternal. */
   uint64_t callback[4] __attribute__((aligned(16))) = {
@@ -1682,48 +1779,55 @@ static void change_colour(void *actor, int colour) {
           "DD_RIG_ACTOR_SWAP actor=%p old=%p new=%p skin=%s group=%s anim=%s\n",
           actor, old, sprite, route->skin, route->group, name);
 }
-static void change_preview(void *panel, void *actor) {
-  const Route *route = find_route(actor, int_at(actor, 0xb68));
-  if (!route && runtime_enabled && runtime_actor(actor))
-    return;
-  if (!route) {
-    apply_preview(panel, actor, route);
-    return;
-  }
+static void **preview_sprite_slot(void *actor) {
   void *(*assets)(void) = (void *)(native_address(DD_ASSETS));
   void *campaign = assets(), *klass = actor_class(actor);
-  if (!campaign) {
-    apply_preview(panel, actor, route);
-    return;
-  }
+  if (!campaign)
+    return NULL;
   unsigned id = (unsigned)int_at(klass, 0xd4);
-  void *node = pointer_at(campaign, 0xe88), *found = NULL;
+  void *node = pointer_at(campaign, 0xe88);
   for (int depth = 0; node && depth < 64; ++depth) {
     unsigned key = (unsigned)int_at(node, 0x20);
-    if (key == id) {
-      found = node;
-      break;
-    }
+    if (key == id)
+      return (void **)((char *)node + 0x60);
     node = pointer_at(node, id < key ? 0x10 : 0x18);
   }
-  if (found) {
-    void *old = pointer_at(found, 0x60);
-    if (old && !sprite_matches(old, route)) {
-      void *sprite = make_sprite(klass, route);
-      if (sprite) {
-        memcpy((char *)found + 0x60, &sprite, sizeof(sprite));
-        apply_preview(panel, actor, route);
-        start_animation(sprite, "idle", 0);
-        discard_sprite(old);
-        dprintf(2, "DD_RIG_PREVIEW_SWAP hero=%p old=%p new=%p group=%s\n",
-                actor, old, sprite, route->group);
-        return;
-      }
-      dprintf(2, "DD_RIG_PREVIEW_REFUSED reason=sprite_load\n");
+  return NULL;
+}
+static void change_preview(void *panel, void *actor) {
+  int native = native_actor_sprite(actor);
+  const Route *route = native ? NULL : find_route(actor, int_at(actor, 0xb68));
+  if (!native && !route && runtime_enabled && runtime_actor(actor))
+    return;
+  if (!native && !route) {
+    apply_preview(panel, actor, NULL);
+    return;
+  }
+  void **slot = preview_sprite_slot(actor);
+  int restored =
+      native && slot ? restore_native_preview(slot, actor_class(actor)) : 1;
+  if (!restored)
+    return;
+  if (route && slot && *slot && !sprite_matches(*slot, route)) {
+    void *sprite = make_sprite(actor_class(actor), route);
+    if (!sprite)
+      return;
+    if (!remember_custom_preview(slot, sprite)) {
+      discard_sprite(sprite);
       return;
     }
+    void *old = *slot;
+    *slot = sprite;
+    apply_preview(panel, actor, route);
+    start_animation(sprite, "idle", 0);
+    discard_sprite(old);
+    dprintf(2, "DD_RIG_PREVIEW_SWAP actor=%p skin=%s source=%s\n", actor,
+            route->skin, route->origin);
+    return;
   }
   apply_preview(panel, actor, route);
+  if (restored == 2)
+    start_animation(*slot, "idle", 0);
 }
 
 static void jump_absolute(unsigned char *out, void *destination) {

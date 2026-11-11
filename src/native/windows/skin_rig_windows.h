@@ -139,14 +139,17 @@ static void start_animation(void *sprite, const char *name, float time) {
     set_time(sprite, fmodf(time, seconds));
 }
 static void *new_actor_sprite(const Handles *original, int flag, void *actor) {
-  const Route *route = find_route(actor, int_at(actor, 0xb68));
-  void *sprite =
-      create_actor_sprite(original, flag, actor_class(actor), &route);
+  const Route *route;
+  void *sprite = construct_actor_sprite(original, flag, actor, &route);
   dprintf(2, "DD_RIG_ACTOR_INIT actor=%p sprite=%p skin=%s\n", actor, sprite,
           route ? route->skin : "native");
   return sprite;
 }
 static void change_colour(void *actor, int colour) {
+  if (native_actor_sprite(actor)) {
+    apply_colour(actor, colour, NULL);
+    return;
+  }
   colour = skin_colour(actor, colour);
   const Route *route = find_route(actor, colour);
   void *old = pointer_at(actor, DD_ACTOR_SPRITE_OFFSET);
@@ -192,20 +195,14 @@ static void change_colour(void *actor, int colour) {
   memcpy((char *)old + 0x50, (char *)sprite + 0x50, sizeof(callbacks));
   memcpy((char *)sprite + 0x50, callbacks, sizeof(callbacks));
   memcpy((char *)actor + DD_ACTOR_SPRITE_OFFSET, &sprite, sizeof(sprite));
+  remember_actor_sprite(actor, sprite);
   apply_colour(actor, colour, route);
   start_animation(sprite, name, time);
   discard_sprite(old);
   dprintf(2, "DD_RIG_ACTOR_SWAP actor=%p skin=%s source=%s\n", actor,
           route->skin, route->origin);
 }
-static void change_preview(void *panel, void *actor) {
-  const Route *route = find_route(actor, int_at(actor, 0xb68));
-  if (!route && runtime_actor(actor))
-    return;
-  if (!route) {
-    apply_preview(panel, actor, route);
-    return;
-  }
+static void **preview_sprite_slot(void *actor) {
   void *head = *(void **)(native_address(DD_PREVIEW_ROOT));
   void *node = head ? pointer_at(head, 8) : NULL;
   unsigned id = (unsigned)int_at(actor_class(actor), 0xd4);
@@ -213,26 +210,46 @@ static void change_preview(void *panel, void *actor) {
     if (*(unsigned char *)((char *)node + 0x19))
       break;
     unsigned key = (unsigned)int_at(node, 0x20);
-    if (key != id) {
-      node = pointer_at(node, id < key ? 0 : 0x10);
-      continue;
-    }
-    void *old = pointer_at(node, 0x60);
-    if (old && !sprite_matches(old, route)) {
-      void *sprite = make_sprite(actor_class(actor), route);
-      if (!sprite)
-        return;
-      memcpy((char *)node + 0x60, &sprite, sizeof(sprite));
-      apply_preview(panel, actor, route);
-      start_animation(sprite, "idle", 0);
-      discard_sprite(old);
-      dprintf(2, "DD_RIG_PREVIEW_SWAP actor=%p skin=%s source=%s\n", actor,
-              route->skin, route->origin);
+    if (key == id)
+      return (void **)((char *)node + 0x60);
+    node = pointer_at(node, id < key ? 0 : 0x10);
+  }
+  return NULL;
+}
+static void change_preview(void *panel, void *actor) {
+  int native = native_actor_sprite(actor);
+  const Route *route = native ? NULL : find_route(actor, int_at(actor, 0xb68));
+  if (!native && !route && runtime_actor(actor))
+    return;
+  if (!native && !route) {
+    apply_preview(panel, actor, NULL);
+    return;
+  }
+  void **slot = preview_sprite_slot(actor);
+  int restored =
+      native && slot ? restore_native_preview(slot, actor_class(actor)) : 1;
+  if (!restored)
+    return;
+  if (route && slot && *slot && !sprite_matches(*slot, route)) {
+    void *sprite = make_sprite(actor_class(actor), route);
+    if (!sprite)
+      return;
+    if (!remember_custom_preview(slot, sprite)) {
+      discard_sprite(sprite);
       return;
     }
-    break;
+    void *old = *slot;
+    *slot = sprite;
+    apply_preview(panel, actor, route);
+    start_animation(sprite, "idle", 0);
+    discard_sprite(old);
+    dprintf(2, "DD_RIG_PREVIEW_SWAP actor=%p skin=%s source=%s\n", actor,
+            route->skin, route->origin);
+    return;
   }
   apply_preview(panel, actor, route);
+  if (restored == 2)
+    start_animation(*slot, "idle", 0);
 }
 
 static void windows_absolute_jump(unsigned char *out, void *destination) {

@@ -188,7 +188,7 @@ int main(int argc, char **argv) {
     return 0;
   }
   assert(initial && initial->plan->count == 3);
-  put_pointer(actor, DD_ACTOR_SPRITE_OFFSET, make_sprite(klass, initial));
+  put_pointer(actor, DD_ACTOR_SPRITE_OFFSET, new_actor_sprite(NULL, 0, actor));
 #ifdef _WIN32
   put_pointer(pointer_at(actor, DD_ACTOR_SPRITE_OFFSET), 0x50, callback_owner);
 #endif
